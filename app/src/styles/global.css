@@ -1,0 +1,112 @@
+:root {
+  --snowpeak-primary: #17402f;
+  --snowpeak-primary-hover: #1f4d3a;
+  --snowpeak-primary-subtle: #e8f0ec;
+  --snowpeak-primary-deep: #0e2a1f;
+  --snowpeak-accent: #17617d;
+  --snowpeak-accent-subtle: #e6f0f4;
+  --snowpeak-success: #2e7d5b;
+  --snowpeak-warning: #c77b2e;
+  --snowpeak-danger: #b5483a;
+  --snowpeak-text: #1f2428;
+  --snowpeak-text-secondary: #5a6268;
+  --snowpeak-border: #d7dcda;
+  --snowpeak-bg-page: #f5f7f6;
+
+  font-family: 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  color: var(--snowpeak-text);
+  background-color: var(--snowpeak-bg-page);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+body {
+  font-size: 14px;
+  line-height: 22px;
+}
+
+.font-mono {
+  font-family: 'IBM Plex Mono', 'SFMono-Regular', Consolas, monospace;
+}
+
+.font-serif {
+  font-family: 'Noto Serif SC', 'Songti SC', 'SimSun', serif;
+}
+
+/* 侧边栏雪线装饰 */
+.snowline {
+  height: 3px;
+  background: linear-gradient(
+    to right,
+    transparent 0%,
+    #9fe1cb 30%,
+    #ffffff 50%,
+    #9fe1cb 70%,
+    transparent 100%
+  );
+}
+
+/* 登录页左侧品牌区 */
+.login-brand {
+  background: var(--snowpeak-primary-deep);
+}
+
+/* 数字金额右对齐 */
+.num {
+  font-family: 'IBM Plex Mono', 'SFMono-Regular', Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 金额为负（退款）显示红色 */
+.num.negative {
+  color: var(--snowpeak-danger);
+}
+
+/* ---------------------------------------------------------------------------
+ * 侧边栏导航（深色背景上的浅色文字/图标，保证对比度 ≥ 4.5:1）
+ * 选择器限定在 .snowpeak-aside 内，不影响其他 Menu。
+ * ------------------------------------------------------------------------- */
+.snowpeak-aside .t-menu--dark .t-menu__item {
+  color: rgba(255, 255, 255, 0.85);
+}
+.snowpeak-aside .t-menu--dark .t-menu__item .t-icon {
+  color: rgba(255, 255, 255, 0.85);
+}
+/* hover：文字/图标变纯白，背景轻微提亮 */
+.snowpeak-aside .t-menu--dark .t-menu__item:hover:not(.t-is-active):not(.t-is-disabled) {
+  color: #ffffff;
+  background-color: rgba(255, 255, 255, 0.12);
+}
+.snowpeak-aside .t-menu--dark .t-menu__item:hover:not(.t-is-active):not(.t-is-disabled) .t-icon {
+  color: #ffffff;
+}
+/* 选中项：白色文字/图标 + 冰川蓝选中背景 */
+.snowpeak-aside .t-menu--dark .t-menu__item.t-is-active {
+  color: #ffffff;
+  background-color: var(--snowpeak-accent);
+}
+.snowpeak-aside .t-menu--dark .t-menu__item.t-is-active .t-icon {
+  color: #ffffff;
+}
+/* 折叠态下的选中项与图标保持一致 */
+.snowpeak-aside .t-menu--dark.t-is-collapsed .t-menu__item.t-is-active {
+  color: #ffffff;
+  background-color: var(--snowpeak-accent);
+}
+.snowpeak-aside .t-menu--dark.t-is-collapsed .t-menu__item.t-is-active .t-icon {
+  color: #ffffff;
+}

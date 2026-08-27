@@ -1,0 +1,41 @@
+{
+  "name": "snowpeak-ski-rental",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "雪峰滑雪租赁管理系统 - 教学演示案例（单机版）",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src --ext .ts,.tsx --report-unused-disable-directives --max-warnings 0",
+    "validate:seed": "node scripts/validate-seed.mjs",
+    "validate:master": "node scripts/validate-master-data.mjs",
+    "validate:workforce": "node scripts/validate-workforce.mjs",
+    "validate:contracts": "node scripts/validate-contracts.mjs",
+    "validate:repairs": "node scripts/validate-repairs.mjs"
+  },
+  "dependencies": {
+    "echarts": "^5.5.1",
+    "echarts-for-react": "^3.0.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.26.2",
+    "tdesign-icons-react": "^0.3.2",
+    "tdesign-react": "^1.10.1"
+  },
+  "devDependencies": {
+    "@rollup/rollup-win32-x64-msvc": "^4.62.5",
+    "@types/react": "^18.3.5",
+    "@types/react-dom": "^18.3.0",
+    "@typescript-eslint/eslint-plugin": "^7.18.0",
+    "@typescript-eslint/parser": "^7.18.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "eslint": "^8.57.0",
+    "eslint-plugin-react-hooks": "^4.6.2",
+    "eslint-plugin-react-refresh": "^0.4.11",
+    "typescript": "^5.5.4",
+    "vite": "^5.4.3"
+  }
+}
