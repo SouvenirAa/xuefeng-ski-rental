@@ -14,7 +14,8 @@
     "validate:master": "node scripts/validate-master-data.mjs",
     "validate:workforce": "node scripts/validate-workforce.mjs",
     "validate:contracts": "node scripts/validate-contracts.mjs",
-    "validate:repairs": "node scripts/validate-repairs.mjs"
+    "validate:repairs": "node scripts/validate-repairs.mjs",
+    "audit:migrations": "node scripts/audit-migrations.mjs"
   },
   "dependencies": {
     "echarts": "^5.5.1",
