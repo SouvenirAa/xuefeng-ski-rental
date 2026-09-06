@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { Button, Input, MessagePlugin, Tag } from 'tdesign-react'
 import { useAuth } from '../auth/AuthContext'
 import { roleHome } from '../auth/permissions'
+import { isCloudMode } from '../lib/cloudbase'
 import { demoTag } from '../theme'
 
 interface DemoAccount {
@@ -31,20 +32,28 @@ export function Login() {
   const [password, setPassword] = useState('')
   const [submitting, setSubmitting] = useState(false)
 
+  // cloud 模式隐藏 demo123 快捷填充（真实密码不得写入源码）
+  const showDemo = !isCloudMode()
+
   // 单一数据源：完全由 React state 控制，登录/回车共用此入口
-  const handleSubmit = () => {
+  const handleSubmit = async () => {
     if (submitting) return
     if (!username.trim() || !password) {
       MessagePlugin.warning('请输入用户名和密码')
       return
     }
     setSubmitting(true)
-    const result = login(username, password)
-    if (result.ok && result.role) {
-      MessagePlugin.success('登录成功')
-      navigate(roleHome[result.role], { replace: true })
-    } else {
-      MessagePlugin.error(result.error ?? '登录失败')
+    try {
+      const result = await login(username, password)
+      if (result.ok && result.role) {
+        MessagePlugin.success('登录成功')
+        navigate(roleHome[result.role], { replace: true })
+      } else {
+        MessagePlugin.error(result.error ?? '登录失败')
+      }
+    } catch {
+      MessagePlugin.error('登录失败，请稍后重试')
+    } finally {
       setSubmitting(false)
     }
   }
@@ -136,37 +145,39 @@ export function Login() {
             登录
           </Button>
 
-          <div style={{ marginTop: 32 }}>
-            <div style={{ fontSize: 13, color: 'var(--snowpeak-text-secondary)', marginBottom: 12 }}>
-              演示账号（点击填充）
+          {showDemo && (
+            <div style={{ marginTop: 32 }}>
+              <div style={{ fontSize: 13, color: 'var(--snowpeak-text-secondary)', marginBottom: 12 }}>
+                演示账号（点击填充）
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {demoAccounts.map((acc) => (
+                  <button
+                    key={acc.username}
+                    type="button"
+                    onClick={() => fillDemo(acc)}
+                    style={{
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      padding: '10px 14px',
+                      background: '#fff',
+                      border: '1px solid var(--snowpeak-border)',
+                      borderRadius: 6,
+                      cursor: 'pointer',
+                      fontSize: 13,
+                      textAlign: 'left',
+                    }}
+                  >
+                    <span className="font-mono" style={{ color: 'var(--snowpeak-text)' }}>
+                      {acc.username} / {acc.password}
+                    </span>
+                    <span style={{ color: 'var(--snowpeak-text-secondary)' }}>{acc.roleLabel}</span>
+                  </button>
+                ))}
+              </div>
             </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              {demoAccounts.map((acc) => (
-                <button
-                  key={acc.username}
-                  type="button"
-                  onClick={() => fillDemo(acc)}
-                  style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    padding: '10px 14px',
-                    background: '#fff',
-                    border: '1px solid var(--snowpeak-border)',
-                    borderRadius: 6,
-                    cursor: 'pointer',
-                    fontSize: 13,
-                    textAlign: 'left',
-                  }}
-                >
-                  <span className="font-mono" style={{ color: 'var(--snowpeak-text)' }}>
-                    {acc.username} / {acc.password}
-                  </span>
-                  <span style={{ color: 'var(--snowpeak-text-secondary)' }}>{acc.roleLabel}</span>
-                </button>
-              ))}
-            </div>
-          </div>
+          )}
         </div>
       </div>
     </div>

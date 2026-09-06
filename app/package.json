@@ -15,9 +15,16 @@
     "validate:workforce": "node scripts/validate-workforce.mjs",
     "validate:contracts": "node scripts/validate-contracts.mjs",
     "validate:repairs": "node scripts/validate-repairs.mjs",
+    "validate:auth": "node scripts/validate-auth.mjs",
+    "validate:cloud-read": "node scripts/validate-cloud-read.mjs",
+    "validate:cloud-master-read": "node scripts/validate-cloud-master-read.mjs",
+    "validate:cloud-workforce-read": "node scripts/validate-cloud-workforce-read.mjs",
+    "validate:cloud-contract-read": "node scripts/validate-cloud-contract-read.mjs",
+    "validate:cloud-repair-read": "node scripts/validate-cloud-repair-read.mjs",
     "audit:migrations": "node scripts/audit-migrations.mjs"
   },
   "dependencies": {
+    "@cloudbase/js-sdk": "^3.9.0",
     "echarts": "^5.5.1",
     "echarts-for-react": "^3.0.2",
     "react": "^18.3.1",

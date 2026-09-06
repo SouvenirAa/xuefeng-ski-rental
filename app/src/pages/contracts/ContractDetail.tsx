@@ -6,6 +6,7 @@ import {
   Descriptions,
   Dialog,
   Empty,
+  Loading,
   MessagePlugin,
   Popconfirm,
   Select,
@@ -19,9 +20,17 @@ import { PageHeader } from '../../components/PageHeader'
 import { StatusTag } from '../../components/StatusTag'
 import { useAuth } from '../../auth/AuthContext'
 import { dataService } from '../../data/dataService'
-import type { ContractChange, ContractLine, RentalItem } from '../../data/types'
+import type { RentalItem } from '../../data/types'
+import type {
+  ContractChangeView,
+  ContractLineView,
+  ItemRefView,
+} from '../../data/cloudContracts'
 import { formatDateTime, formatMoney, today } from '../../utils/format'
-import { useDbData } from '../../hooks/useDbData'
+import { useDbData, type UseDbDataOptions } from '../../hooks/useDbData'
+import { useContractDetail } from '../../hooks/useContractDetail'
+import { parseContractIdParam } from '../../data/contractDataSource'
+import { isCloudMode } from '../../lib/cloudbase'
 
 const fieldLabel: React.CSSProperties = {
   display: 'block',
@@ -37,36 +46,48 @@ function dateDiffDays(from: string, to: string): number {
 }
 
 interface LineRow {
-  item: RentalItem | null
-  line: ContractLine
+  item: ItemRefView | null
+  line: ContractLineView
   checkout_store_name: string
   return_store_name: string
 }
+
+/** 稳定空设备数组：cloud 模式下 useDbData 的 disabledValue */
+const EMPTY_ITEMS: RentalItem[] = []
 
 export function ContractDetail() {
   const { id } = useParams()
   const navigate = useNavigate()
   const { role } = useAuth()
-  const contractId = Number(id)
+  // 严格解析路由 ID：非法值（abc/0/负数/小数/Infinity/NaN/指数/多余字符/超安全整数）→ null
+  const contractId = parseContractIdParam(id)
+  const isCloud = isCloudMode()
 
-  const detail = useDbData(() => dataService.getContractDetail(contractId))
-  const stores = useDbData(() => dataService.listStores())
-  const items = useDbData(() => dataService.listItems())
+  const { detail, loading, error, notFound, invalid, retry } = useContractDetail(contractId)
+
+  // 门店名解析：优先用详情自带 stores（local/cloud 均可用）；local 的详情视图已含 stores。
+  const stores = useMemo(() => detail?.stores ?? [], [detail])
+
+  // 完整设备列表仅本地模式的换货候选/差价预估需要；cloud 模式或非法 ID 下零订阅零 read。
+  const itemsOptions: UseDbDataOptions<RentalItem[]> = isCloud || invalid
+    ? { enabled: false, disabledValue: EMPTY_ITEMS }
+    : { enabled: true }
+  const items = useDbData(() => dataService.listItems(), itemsOptions)
 
   const contract = detail?.contract ?? null
   const lines = useMemo(() => detail?.lines ?? [], [detail])
   const changes = useMemo(() => detail?.changes ?? [], [detail])
 
-  // 换货 Dialog 状态
+  // 换货 Dialog 状态（仅 local 使用）
   const [exchangeVisible, setExchangeVisible] = useState(false)
-  const [exchangeLine, setExchangeLine] = useState<ContractLine | null>(null)
+  const [exchangeLine, setExchangeLine] = useState<ContractLineView | null>(null)
   const [newItemId, setNewItemId] = useState<number | undefined>(undefined)
   const [returnStoreId, setReturnStoreId] = useState<number | undefined>(undefined)
   const [changeDate, setChangeDate] = useState(today())
   const [exchangeSubmitting, setExchangeSubmitting] = useState(false)
   const [exchangeError, setExchangeError] = useState<Record<string, string>>({})
 
-  // 归还 Dialog 状态
+  // 归还 Dialog 状态（仅 local 使用）
   const [returnVisible, setReturnVisible] = useState(false)
   const [returnLineIds, setReturnLineIds] = useState<number[]>([])
   const [returnStoreId2, setReturnStoreId2] = useState<number | undefined>(undefined)
@@ -108,7 +129,7 @@ export function ContractDetail() {
 
   // 变更时间线：按分组聚合
   const groupedChanges = useMemo(() => {
-    const groups = new Map<number | null, ContractChange[]>()
+    const groups = new Map<number | null, ContractChangeView[]>()
     for (const ch of changes) {
       const key = ch.change_group_id
       const arr = groups.get(key) ?? []
@@ -118,16 +139,68 @@ export function ContractDetail() {
     return Array.from(groups.entries()).sort((a, b) => (a[1][0].change_date < b[1][0].change_date ? -1 : 1))
   }, [changes])
 
-  if (!detail || !contract) {
+  // 五态渲染：invalid（非法路由 ID，不查询、不 loading、不重试）→ loading → error → notFound → found
+  if (invalid) {
     return (
       <div>
-        <PageHeader title="合同详情" />
+        <PageHeader
+          title="合同详情"
+          subtitle={isCloud ? 'CloudBase PostgreSQL · 只读阶段' : undefined}
+        />
+        <Empty description="合同编号无效" />
+      </div>
+    )
+  }
+
+  if (isCloud && loading) {
+    return (
+      <div>
+        <PageHeader title="合同详情" subtitle="CloudBase PostgreSQL · 只读阶段" />
+        <div style={{ display: 'flex', justifyContent: 'center', padding: 48 }}>
+          <Loading text="加载中..." />
+        </div>
+      </div>
+    )
+  }
+
+  if (isCloud && error) {
+    return (
+      <div>
+        <PageHeader title="合同详情" subtitle="CloudBase PostgreSQL · 只读阶段" />
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            padding: '16px',
+            border: '1px solid var(--snowpeak-border)',
+            borderRadius: 8,
+            color: 'var(--snowpeak-danger)',
+            fontSize: 13,
+          }}
+        >
+          <span>{error}</span>
+          <Button size="small" variant="outline" onClick={retry}>
+            重试
+          </Button>
+        </div>
+      </div>
+    )
+  }
+
+  if (notFound || !contract) {
+    return (
+      <div>
+        <PageHeader
+          title="合同详情"
+          subtitle={isCloud ? 'CloudBase PostgreSQL · 只读阶段' : undefined}
+        />
         <Empty description="合同不存在或已被删除" />
       </div>
     )
   }
 
-  const openExchange = (line: ContractLine) => {
+  const openExchange = (line: ContractLineView) => {
     setExchangeLine(line)
     setNewItemId(undefined)
     setReturnStoreId(line.checkout_store_id)
@@ -140,7 +213,7 @@ export function ContractDetail() {
     if (exchangeSubmitting || !role || !exchangeLine) return
     setExchangeSubmitting(true)
     const result = dataService.exchangeItem(role, {
-      contract_id: contractId,
+      contract_id: contract.contract_id,
       old_line_id: exchangeLine.contract_line_id,
       new_item_id: newItemId as number,
       return_store_id: returnStoreId as number,
@@ -170,7 +243,7 @@ export function ContractDetail() {
     if (returnSubmitting || !role) return
     setReturnSubmitting(true)
     const result = dataService.returnItems(role, {
-      contract_id: contractId,
+      contract_id: contract.contract_id,
       line_ids: returnLineIds,
       return_store_id: returnStoreId2 as number,
     })
@@ -215,31 +288,36 @@ export function ContractDetail() {
       width: 90,
       cell: ({ row }) => <StatusTag status={row.line.status} />,
     },
-    {
-      colKey: 'op',
-      title: '操作',
-      width: 130,
-      fixed: 'right',
-      cell: ({ row }) => {
-        if (row.line.status !== '借出中' || isCompleted) return null
-        return (
-          <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-            <Button size="small" variant="text" theme="primary" onClick={() => openExchange(row.line)}>
-              换货
-            </Button>
-            <Popconfirm
-              content="确认归还该设备？"
-              confirmBtn={{ content: '归还', theme: 'primary' }}
-              onConfirm={() => openReturn([row.line.contract_line_id])}
-            >
-              <Button size="small" variant="text" theme="primary">
-                归还
-              </Button>
-            </Popconfirm>
-          </div>
-        )
-      },
-    },
+    // 操作列仅在 local 模式存在（cloud 只读，隐藏换货/单件归还）
+    ...(isCloud
+      ? []
+      : [
+          {
+            colKey: 'op',
+            title: '操作',
+            width: 130,
+            fixed: 'right' as const,
+            cell: ({ row }: { row: LineRow }) => {
+              if (row.line.status !== '借出中' || isCompleted) return null
+              return (
+                <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                  <Button size="small" variant="text" theme="primary" onClick={() => openExchange(row.line)}>
+                    换货
+                  </Button>
+                  <Popconfirm
+                    content="确认归还该设备？"
+                    confirmBtn={{ content: '归还', theme: 'primary' }}
+                    onConfirm={() => openReturn([row.line.contract_line_id])}
+                  >
+                    <Button size="small" variant="text" theme="primary">
+                      归还
+                    </Button>
+                  </Popconfirm>
+                </div>
+              )
+            },
+          },
+        ]),
   ]
 
   const lineRows: LineRow[] = lines.map((l) => ({
@@ -258,15 +336,18 @@ export function ContractDetail() {
       </div>
 
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16 }}>
-        <PageHeader title={`合同 ${contract.contract_no}`} subtitle="查看明细、执行换货与归还" />
+        <PageHeader
+          title={`合同 ${contract.contract_no}`}
+          subtitle={isCloud ? 'CloudBase PostgreSQL · 只读阶段' : '查看明细、执行换货与归还'}
+        />
         <StatusTag status={contract.status} />
       </div>
 
       {/* 概要 */}
       <div style={{ background: 'var(--snowpeak-bg-container)', border: '1px solid var(--snowpeak-border)', borderRadius: 8, padding: 16, marginBottom: 16 }}>
         <Descriptions column={3} colon>
-          <Descriptions.DescriptionsItem label="客户">{detail.customer?.full_name ?? '—'}</Descriptions.DescriptionsItem>
-          <Descriptions.DescriptionsItem label="经办员工">{detail.employee?.full_name ?? '—'}</Descriptions.DescriptionsItem>
+          <Descriptions.DescriptionsItem label="客户">{detail?.customer?.full_name ?? '—'}</Descriptions.DescriptionsItem>
+          <Descriptions.DescriptionsItem label="经办员工">{detail?.employee?.full_name ?? '—'}</Descriptions.DescriptionsItem>
           <Descriptions.DescriptionsItem label="合同日期">{contract.contract_date}</Descriptions.DescriptionsItem>
           <Descriptions.DescriptionsItem label="租赁天数">{contract.duration_days} 天</Descriptions.DescriptionsItem>
           <Descriptions.DescriptionsItem label="应收总额">
@@ -282,7 +363,7 @@ export function ContractDetail() {
       <div style={{ background: 'var(--snowpeak-bg-container)', border: '1px solid var(--snowpeak-border)', borderRadius: 8, marginBottom: 16 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', borderBottom: '1px solid var(--snowpeak-border)' }}>
           <span style={{ fontSize: 14, fontWeight: 600 }}>合同明细</span>
-          {!isCompleted && activeLines.length > 0 && (
+          {!isCloud && !isCompleted && activeLines.length > 0 && (
             <Button size="small" variant="outline" onClick={() => openReturn(activeLines.map((l) => l.line.contract_line_id))}>
               批量归还（{activeLines.length}）
             </Button>
@@ -348,144 +429,147 @@ export function ContractDetail() {
         )}
       </div>
 
-      {/* 换货 Dialog */}
-      <Dialog
-        visible={exchangeVisible}
-        header="换货"
-        width={520}
-        confirmBtn={{ content: '确认换货', theme: 'primary', loading: exchangeSubmitting }}
-        cancelBtn="取消"
-        onConfirm={handleExchange}
-        onClose={() => setExchangeVisible(false)}
-      >
-        <div style={{ padding: '8px 0' }}>
-          <div style={{ marginBottom: 16 }}>
-            <label style={fieldLabel}>旧设备（只读）</label>
-            <div style={{ fontSize: 13 }}>
-              {exchangeOldItem ? `${exchangeOldItem.item_code} · ${exchangeOldItem.name}（日租金 ${formatMoney(exchangeLine?.daily_rate ?? exchangeOldItem.daily_rate)}）` : '—'}
-            </div>
-          </div>
-          <div style={{ marginBottom: 16 }}>
-            <label style={fieldLabel}>
-              新设备 <span style={{ color: 'var(--snowpeak-danger)' }}>*</span>
-            </label>
-            <Select
-              value={newItemId}
-              onChange={(v) => setNewItemId(v === '' ? undefined : Number(v))}
-              placeholder="选择在库设备（不含本合同已有设备）"
-              filterable
-              options={exchangeCandidates.map((i) => ({
-                label: `${i.item_code} · ${i.name}（${formatMoney(i.daily_rate)}）`,
-                value: i.item_id,
-              }))}
-              status={exchangeError.new_item_id ? 'error' : 'default'}
-              tips={exchangeError.new_item_id}
-              style={{ width: '100%' }}
-            />
-          </div>
-          <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
-            <div style={{ flex: 1 }}>
-              <label style={fieldLabel}>
-                归还门店 <span style={{ color: 'var(--snowpeak-danger)' }}>*</span>
-              </label>
-              <Select
-                value={returnStoreId}
-                onChange={(v) => setReturnStoreId(v === '' ? undefined : Number(v))}
-                options={stores.map((s) => ({ label: s.store_name, value: s.store_id }))}
-                status={exchangeError.return_store_id ? 'error' : 'default'}
-                tips={exchangeError.return_store_id}
-                style={{ width: '100%' }}
-              />
-            </div>
-            <div style={{ flex: 1 }}>
-              <label style={fieldLabel}>
-                换货日期 <span style={{ color: 'var(--snowpeak-danger)' }}>*</span>
-              </label>
-              <DatePicker
-                value={changeDate}
-                onChange={(v) => setChangeDate(v ? String(v) : '')}
-                disableDate={(date) => {
-                  const dt = new Date(date as Date)
-                  const p = (n: number) => String(n).padStart(2, '0')
-                  const ymd = `${dt.getFullYear()}-${p(dt.getMonth() + 1)}-${p(dt.getDate())}`
-                  return ymd !== today()
-                }}
-                status={exchangeError.change_date ? 'error' : 'default'}
-                tips={exchangeError.change_date}
-                style={{ width: '100%' }}
-              />
-              <div style={{ marginTop: 4, fontSize: 12, color: 'var(--snowpeak-text-placeholder)' }}>
-                换货按实际操作时间记录，仅允许选择今天
+      {/* 换货 / 归还 Dialog —— 仅 local 模式 */}
+      {!isCloud && (
+        <>
+          <Dialog
+            visible={exchangeVisible}
+            header="换货"
+            width={520}
+            confirmBtn={{ content: '确认换货', theme: 'primary', loading: exchangeSubmitting }}
+            cancelBtn="取消"
+            onConfirm={handleExchange}
+            onClose={() => setExchangeVisible(false)}
+          >
+            <div style={{ padding: '8px 0' }}>
+              <div style={{ marginBottom: 16 }}>
+                <label style={fieldLabel}>旧设备（只读）</label>
+                <div style={{ fontSize: 13 }}>
+                  {exchangeOldItem ? `${exchangeOldItem.item_code} · ${exchangeOldItem.name}（日租金 ${formatMoney(exchangeLine?.daily_rate ?? exchangeOldItem.daily_rate)}）` : '—'}
+                </div>
+              </div>
+              <div style={{ marginBottom: 16 }}>
+                <label style={fieldLabel}>
+                  新设备 <span style={{ color: 'var(--snowpeak-danger)' }}>*</span>
+                </label>
+                <Select
+                  value={newItemId}
+                  onChange={(v) => setNewItemId(v === '' ? undefined : Number(v))}
+                  placeholder="选择在库设备（不含本合同已有设备）"
+                  filterable
+                  options={exchangeCandidates.map((i) => ({
+                    label: `${i.item_code} · ${i.name}（${formatMoney(i.daily_rate)}）`,
+                    value: i.item_id,
+                  }))}
+                  status={exchangeError.new_item_id ? 'error' : 'default'}
+                  tips={exchangeError.new_item_id}
+                  style={{ width: '100%' }}
+                />
+              </div>
+              <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
+                <div style={{ flex: 1 }}>
+                  <label style={fieldLabel}>
+                    归还门店 <span style={{ color: 'var(--snowpeak-danger)' }}>*</span>
+                  </label>
+                  <Select
+                    value={returnStoreId}
+                    onChange={(v) => setReturnStoreId(v === '' ? undefined : Number(v))}
+                    options={stores.map((s) => ({ label: s.store_name, value: s.store_id }))}
+                    status={exchangeError.return_store_id ? 'error' : 'default'}
+                    tips={exchangeError.return_store_id}
+                    style={{ width: '100%' }}
+                  />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <label style={fieldLabel}>
+                    换货日期 <span style={{ color: 'var(--snowpeak-danger)' }}>*</span>
+                  </label>
+                  <DatePicker
+                    value={changeDate}
+                    onChange={(v) => setChangeDate(v ? String(v) : '')}
+                    disableDate={(date) => {
+                      const dt = new Date(date as Date)
+                      const p = (n: number) => String(n).padStart(2, '0')
+                      const ymd = `${dt.getFullYear()}-${p(dt.getMonth() + 1)}-${p(dt.getDate())}`
+                      return ymd !== today()
+                    }}
+                    status={exchangeError.change_date ? 'error' : 'default'}
+                    tips={exchangeError.change_date}
+                    style={{ width: '100%' }}
+                  />
+                  <div style={{ marginTop: 4, fontSize: 12, color: 'var(--snowpeak-text-placeholder)' }}>
+                    换货按实际操作时间记录，仅允许选择今天
+                  </div>
+                </div>
+              </div>
+              <div style={{ background: 'var(--snowpeak-bg-page)', border: '1px solid var(--snowpeak-border)', borderRadius: 6, padding: 12, fontSize: 13 }}>
+                {exchangePreview ? (
+                  <>
+                    <div>剩余天数：{exchangePreview.remaining} 天</div>
+                    <div style={{ marginTop: 4 }}>
+                      预估差价：
+                      {exchangePreview.delta >= 0 ? (
+                        <span className="num" style={{ color: 'var(--snowpeak-success)' }}>
+                          补收 {formatMoney(exchangePreview.delta)}
+                        </span>
+                      ) : (
+                        <span className="num negative" style={{ color: 'var(--snowpeak-danger)' }}>
+                          退款 {formatMoney(exchangePreview.delta)}
+                        </span>
+                      )}
+                    </div>
+                    <div style={{ marginTop: 4, color: 'var(--snowpeak-text-placeholder)' }}>最终金额以系统复核为准</div>
+                  </>
+                ) : (
+                  <span style={{ color: 'var(--snowpeak-text-placeholder)' }}>选择新设备与有效日期后显示差价预估</span>
+                )}
               </div>
             </div>
-          </div>
-          <div style={{ background: 'var(--snowpeak-bg-page)', border: '1px solid var(--snowpeak-border)', borderRadius: 6, padding: 12, fontSize: 13 }}>
-            {exchangePreview ? (
-              <>
-                <div>剩余天数：{exchangePreview.remaining} 天</div>
-                <div style={{ marginTop: 4 }}>
-                  预估差价：
-                  {exchangePreview.delta >= 0 ? (
-                    <span className="num" style={{ color: 'var(--snowpeak-success)' }}>
-                      补收 {formatMoney(exchangePreview.delta)}
-                    </span>
-                  ) : (
-                    <span className="num negative" style={{ color: 'var(--snowpeak-danger)' }}>
-                      退款 {formatMoney(exchangePreview.delta)}
-                    </span>
-                  )}
-                </div>
-                <div style={{ marginTop: 4, color: 'var(--snowpeak-text-placeholder)' }}>最终金额以系统复核为准</div>
-              </>
-            ) : (
-              <span style={{ color: 'var(--snowpeak-text-placeholder)' }}>选择新设备与有效日期后显示差价预估</span>
-            )}
-          </div>
-        </div>
-      </Dialog>
+          </Dialog>
 
-      {/* 归还 Dialog */}
-      <Dialog
-        visible={returnVisible}
-        header="归还"
-        width={520}
-        confirmBtn={{ content: '确认归还', theme: 'primary', loading: returnSubmitting }}
-        cancelBtn="取消"
-        onConfirm={handleReturn}
-        onClose={() => setReturnVisible(false)}
-      >
-        <div style={{ padding: '8px 0' }}>
-          <div style={{ marginBottom: 16 }}>
-            <label style={fieldLabel}>待归还明细（{returnLineIds.length} 件）</label>
-            <div style={{ fontSize: 13 }}>
-              {returnLineIds.map((lid) => {
-                const l = lines.find((x) => x.line.contract_line_id === lid)
-                return l ? (
-                  <div key={lid} style={{ padding: '4px 0' }}>
-                    <Tag variant="light" style={{ marginRight: 8, background: 'var(--snowpeak-accent-subtle)', color: 'var(--snowpeak-accent)', borderColor: 'transparent' }}>
-                      {l.item?.item_code ?? '—'}
-                    </Tag>
-                    {l.item?.name ?? '—'}
-                  </div>
-                ) : null
-              })}
+          <Dialog
+            visible={returnVisible}
+            header="归还"
+            width={520}
+            confirmBtn={{ content: '确认归还', theme: 'primary', loading: returnSubmitting }}
+            cancelBtn="取消"
+            onConfirm={handleReturn}
+            onClose={() => setReturnVisible(false)}
+          >
+            <div style={{ padding: '8px 0' }}>
+              <div style={{ marginBottom: 16 }}>
+                <label style={fieldLabel}>待归还明细（{returnLineIds.length} 件）</label>
+                <div style={{ fontSize: 13 }}>
+                  {returnLineIds.map((lid) => {
+                    const l = lines.find((x) => x.line.contract_line_id === lid)
+                    return l ? (
+                      <div key={lid} style={{ padding: '4px 0' }}>
+                        <Tag variant="light" style={{ marginRight: 8, background: 'var(--snowpeak-accent-subtle)', color: 'var(--snowpeak-accent)', borderColor: 'transparent' }}>
+                          {l.item?.item_code ?? '—'}
+                        </Tag>
+                        {l.item?.name ?? '—'}
+                      </div>
+                    ) : null
+                  })}
+                </div>
+              </div>
+              <div style={{ marginBottom: 8 }}>
+                <label style={fieldLabel}>
+                  归还门店 <span style={{ color: 'var(--snowpeak-danger)' }}>*</span>
+                </label>
+                <Select
+                  value={returnStoreId2}
+                  onChange={(v) => setReturnStoreId2(v === '' ? undefined : Number(v))}
+                  options={stores.map((s) => ({ label: s.store_name, value: s.store_id }))}
+                  status={returnError.return_store_id ? 'error' : 'default'}
+                  tips={returnError.return_store_id}
+                  style={{ width: '100%' }}
+                />
+              </div>
             </div>
-          </div>
-          <div style={{ marginBottom: 8 }}>
-            <label style={fieldLabel}>
-              归还门店 <span style={{ color: 'var(--snowpeak-danger)' }}>*</span>
-            </label>
-            <Select
-              value={returnStoreId2}
-              onChange={(v) => setReturnStoreId2(v === '' ? undefined : Number(v))}
-              options={stores.map((s) => ({ label: s.store_name, value: s.store_id }))}
-              status={returnError.return_store_id ? 'error' : 'default'}
-              tips={returnError.return_store_id}
-              style={{ width: '100%' }}
-            />
-          </div>
-        </div>
-      </Dialog>
+          </Dialog>
+        </>
+      )}
     </div>
   )
 }

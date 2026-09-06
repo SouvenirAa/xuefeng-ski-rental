@@ -11,32 +11,26 @@ import {
 import { AddIcon, SearchIcon } from 'tdesign-icons-react'
 import { PageHeader } from '../../components/PageHeader'
 import { StatusTag } from '../../components/StatusTag'
-import { dataService } from '../../data/dataService'
-import type { RentalContract } from '../../data/types'
+import type { ContractListRowView } from '../../data/cloudContracts'
 import { formatDate, formatMoney } from '../../utils/format'
 import { usePagination } from '../../hooks/usePagination'
-import { useDbData } from '../../hooks/useDbData'
+import { useContracts } from '../../hooks/useContracts'
+import { isCloudMode } from '../../lib/cloudbase'
 
 export function Contracts() {
   const navigate = useNavigate()
+  const isCloud = isCloudMode()
   const [keyword, setKeyword] = useState('')
   const [filterStatus, setFilterStatus] = useState<string>('')
   const [dateRange, setDateRange] = useState<string[]>([])
 
-  const contracts = useDbData(() => dataService.listContracts())
-  const customers = useDbData(() => dataService.listCustomers())
-  const employees = useDbData(() => dataService.listEmployees())
-
-  const customerName = (id: number) =>
-    customers.find((c) => c.customer_id === id)?.full_name ?? `#${id}`
-  const employeeName = (id: number) =>
-    employees.find((e) => e.employee_id === id)?.full_name ?? `#${id}`
+  const { contracts, loading, error, retry } = useContracts()
 
   const filtered = useMemo(() => {
     return contracts.filter((c) => {
       if (keyword.trim()) {
         const kw = keyword.trim().toLowerCase()
-        const hit = c.contract_no.toLowerCase().includes(kw) || customerName(c.customer_id).toLowerCase().includes(kw)
+        const hit = c.contract_no.toLowerCase().includes(kw) || c.customer_name.toLowerCase().includes(kw)
         if (!hit) return false
       }
       if (filterStatus && c.status !== filterStatus) return false
@@ -44,12 +38,11 @@ export function Contracts() {
       if (dateRange[1] && c.contract_date > dateRange[1]) return false
       return true
     })
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [contracts, keyword, filterStatus, dateRange, customers, employees])
+  }, [contracts, keyword, filterStatus, dateRange])
 
   const { page, pageSize, setPage, setPageSize, paged, total } = usePagination(filtered, 10)
 
-  const columns: PrimaryTableCol<RentalContract>[] = [
+  const columns: PrimaryTableCol<ContractListRowView>[] = [
     {
       colKey: 'contract_no',
       title: '合同编号',
@@ -67,8 +60,8 @@ export function Contracts() {
         </Button>
       ),
     },
-    { colKey: 'customer', title: '客户', width: 110, cell: ({ row }) => customerName(row.customer_id) },
-    { colKey: 'employee', title: '经办员工', width: 110, cell: ({ row }) => employeeName(row.employee_id) },
+    { colKey: 'customer', title: '客户', width: 110, cell: ({ row }) => row.customer_name },
+    { colKey: 'employee', title: '经办员工', width: 110, cell: ({ row }) => row.employee_name },
     { colKey: 'contract_date', title: '合同日期', width: 120, cell: ({ row }) => formatDate(row.contract_date) },
     { colKey: 'duration_days', title: '租赁天数', width: 90, cell: ({ row }) => `${row.duration_days} 天` },
     {
@@ -98,7 +91,10 @@ export function Contracts() {
 
   return (
     <div>
-      <PageHeader title="租赁合同" subtitle="查看合同与状态，执行新建、借出、换货与归还" />
+      <PageHeader
+        title="租赁合同"
+        subtitle={isCloud ? 'CloudBase PostgreSQL · 只读阶段' : '查看合同与状态，执行新建、借出、换货与归还'}
+      />
 
       <div style={{ background: 'var(--snowpeak-bg-container)', border: '1px solid var(--snowpeak-border)', borderRadius: 8 }}>
         <div
@@ -143,10 +139,31 @@ export function Contracts() {
             style={{ width: 260 }}
           />
           <div style={{ flex: 1 }} />
-          <Button theme="primary" icon={<AddIcon />} onClick={() => navigate('/contracts/new')}>
-            新建合同
-          </Button>
+          {!isCloud && (
+            <Button theme="primary" icon={<AddIcon />} onClick={() => navigate('/contracts/new')}>
+              新建合同
+            </Button>
+          )}
         </div>
+
+        {isCloud && error && (
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              padding: '12px 16px',
+              borderBottom: '1px solid var(--snowpeak-border)',
+              color: 'var(--snowpeak-danger)',
+              fontSize: 13,
+            }}
+          >
+            <span>{error}</span>
+            <Button size="small" variant="outline" onClick={retry}>
+              重试
+            </Button>
+          </div>
+        )}
 
         <Table
           data={paged.items}
@@ -154,8 +171,15 @@ export function Contracts() {
           rowKey="contract_id"
           size="small"
           hover
+          loading={isCloud && loading}
           tableLayout="fixed"
-          empty={keyword.trim() || filterStatus || dateRange.length > 0 ? '未找到匹配的合同' : '暂无合同，点击右上角「新建合同」录入'}
+          empty={
+            keyword.trim() || filterStatus || dateRange.length > 0
+              ? '未找到匹配的合同'
+              : isCloud
+                ? '暂无合同数据'
+                : '暂无合同，点击右上角「新建合同」录入'
+          }
           pagination={{
             current: page,
             pageSize,

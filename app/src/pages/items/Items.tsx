@@ -15,10 +15,12 @@ import { PageHeader } from '../../components/PageHeader'
 import { StatusTag } from '../../components/StatusTag'
 import { useAuth } from '../../auth/AuthContext'
 import { dataService } from '../../data/dataService'
+import { isCloudMode } from '../../lib/cloudbase'
+import { useMasterData } from '../../hooks/useMasterData'
 import type { ItemCategory, RentalItem, RentalItemInput } from '../../data/types'
+import type { RentalItemView } from '../../data/cloudMaster'
 import { formatMoney } from '../../utils/format'
 import { usePagination } from '../../hooks/usePagination'
-import { useDbData } from '../../hooks/useDbData'
 
 const CATEGORIES: ItemCategory[] = ['滑雪板', '雪靴', '雪杖', '单板', '护目镜', '头盔']
 const ACCESSORY_CATEGORIES: ItemCategory[] = ['护目镜', '头盔']
@@ -92,7 +94,8 @@ const fieldLabel: React.CSSProperties = {
 
 export function Items() {
   const { role } = useAuth()
-  const isReadonly = role !== 'admin'
+  const isCloud = isCloudMode()
+  const isReadonly = isCloud || role !== 'admin'
 
   const [keyword, setKeyword] = useState('')
   const [filterCategory, setFilterCategory] = useState<string>('')
@@ -106,9 +109,7 @@ export function Items() {
   const [fieldError, setFieldError] = useState<Record<string, string>>({})
   const [submitting, setSubmitting] = useState(false)
 
-  const all = useDbData(() => dataService.listItems())
-  const stores = useDbData(() => dataService.listStores())
-  const levels = useDbData(() => dataService.listSkillLevels())
+  const { items: all, stores, skillLevels: levels, loading, error, retry } = useMasterData()
 
   const storeName = (id: number) => stores.find((s) => s.store_id === id)?.store_name ?? `#${id}`
   const levelName = (id: number | null) =>
@@ -134,14 +135,20 @@ export function Items() {
   }
 
   const openCreate = () => {
+    if (isCloud) return
     setEditing(null)
     resetForm()
     setDrawerVisible(true)
   }
 
-  const openEdit = (i: RentalItem) => {
-    setEditing(i)
-    setForm(toForm(i))
+  const openEdit = (i: RentalItemView) => {
+    if (isCloud) return
+    // local 模式：从 DataService 取完整 RentalItem（含 description/purchase_date 等可空字段，
+    // 本地恒写非空），供编辑表单回填；云端只读列表仅用 RentalItemView。
+    const full = dataService.listItems().find((x) => x.item_id === i.item_id)
+    if (!full) return
+    setEditing(full)
+    setForm(toForm(full))
     setFieldError({})
     setDrawerVisible(true)
   }
@@ -163,7 +170,7 @@ export function Items() {
   const isAccessory = ACCESSORY_CATEGORIES.includes(form.category)
 
   const handleSave = () => {
-    if (submitting || !role) return
+    if (submitting || !role || isCloud) return
     setSubmitting(true)
     const result = editing
       ? dataService.updateItem(role, editing.item_id, toInput(form))
@@ -183,8 +190,8 @@ export function Items() {
     }
   }
 
-  const handleDelete = (i: RentalItem) => {
-    if (!role) return
+  const handleDelete = (i: RentalItemView) => {
+    if (!role || isCloud) return
     const result = dataService.removeItem(role, i.item_id)
     if (result.ok) {
       MessagePlugin.success('设备已删除')
@@ -193,7 +200,7 @@ export function Items() {
     }
   }
 
-  const columns: PrimaryTableCol<RentalItem>[] = [
+  const columns: PrimaryTableCol<RentalItemView>[] = [
     { colKey: 'item_code', title: '库存编号', width: 110, className: 'font-mono' },
     { colKey: 'name', title: '名称', width: 160, ellipsis: true },
     { colKey: 'category', title: '类别', width: 90 },
@@ -233,6 +240,13 @@ export function Items() {
       width: 130,
       fixed: 'right',
       cell: ({ row }) => {
+        if (isCloud) {
+          return (
+            <span style={{ color: 'var(--snowpeak-text-placeholder)', fontSize: 12 }}>
+              云端写入待迁移
+            </span>
+          )
+        }
         if (isReadonly) {
           return <span style={{ color: 'var(--snowpeak-text-placeholder)' }}>仅查看</span>
         }
@@ -260,7 +274,11 @@ export function Items() {
     <div>
       <PageHeader
         title="设备管理"
-        subtitle="以单品粒度维护租赁物品、技能等级与归属/当前门店"
+        subtitle={
+          isCloud
+            ? 'CloudBase PostgreSQL · 只读阶段'
+            : '以单品粒度维护租赁物品、技能等级与归属/当前门店'
+        }
       />
 
       <div
@@ -344,16 +362,38 @@ export function Items() {
           )}
         </div>
 
+        {isCloud && error && (
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              padding: '12px 16px',
+              borderBottom: '1px solid var(--snowpeak-border)',
+              color: 'var(--snowpeak-danger)',
+              fontSize: 13,
+            }}
+          >
+            <span>{error}</span>
+            <Button size="small" variant="outline" onClick={retry}>
+              重试
+            </Button>
+          </div>
+        )}
+
         <Table
           data={paged.items}
           columns={columns}
           rowKey="item_id"
           size="small"
           hover
+          loading={isCloud && loading}
           empty={
             keyword.trim() || filterCategory || filterStatus || filterLevel || filterStore
               ? '未找到匹配的设备'
-              : '暂无设备，点击右上角「新增设备」录入'
+              : isCloud
+                ? '暂无设备数据'
+                : '暂无设备，点击右上角「新增设备」录入'
           }
           pagination={{
             current: page,
@@ -368,13 +408,14 @@ export function Items() {
         />
       </div>
 
-      <Drawer
-        visible={drawerVisible}
-        header={
-          editing
-            ? `编辑设备 ${editing.item_code}`
-            : '新增设备'
-        }
+      {!isCloud && (
+        <Drawer
+          visible={drawerVisible}
+          header={
+            editing
+              ? `编辑设备 ${editing.item_code}`
+              : '新增设备'
+          }
         size="520px"
         onClose={() => setDrawerVisible(false)}
         footer={
@@ -551,7 +592,8 @@ export function Items() {
             </div>
           </div>
         </div>
-      </Drawer>
+        </Drawer>
+      )}
     </div>
   )
 }

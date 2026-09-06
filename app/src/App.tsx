@@ -2,7 +2,9 @@ import { BrowserRouter, Route, Routes } from 'react-router-dom'
 import { Loading } from 'tdesign-react'
 import { AuthProvider } from './auth/AuthContext'
 import { DbProvider, useDb } from './data/DbContext'
+import { getConfigError } from './lib/cloudbase'
 import { AppLayout } from './components/AppLayout'
+import { ConfigErrorPage } from './components/ConfigErrorPage'
 import { HomeRedirect } from './components/HomeRedirect'
 import { ProtectedRoute } from './components/ProtectedRoute'
 import { RoleGuard } from './components/RoleGuard'
@@ -22,6 +24,14 @@ import { ContractDetail } from './pages/contracts/ContractDetail'
 import { Repairs } from './pages/repairs/Repairs'
 
 export function App() {
+  // 配置门禁：必须在 DbProvider 之前，避免配置错误时挂载 DbProvider 并初始化/读写本地数据库。
+  // dataMode 非法或 cloud 缺必填配置时，直接渲染错误页，不挂载 DbProvider / AuthProvider，
+  // 不初始化 dataService，不进入 Router 和业务页面（fail-closed）。
+  const configError = getConfigError()
+  if (configError) {
+    return <ConfigErrorPage message={configError} />
+  }
+
   return (
     <DbProvider>
       <AppGate />
@@ -29,7 +39,7 @@ export function App() {
   )
 }
 
-/** 根据数据库状态决定渲染：加载中 / 损坏恢复页 / 正常应用 */
+/** 仅负责数据库 loading / error / ready，配置门禁已上移到 App() 最外层 */
 function AppGate() {
   const { status } = useDb()
 

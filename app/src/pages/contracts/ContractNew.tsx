@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { Navigate, useNavigate } from 'react-router-dom'
 import {
   Button,
   DatePicker,
@@ -18,6 +18,7 @@ import { dataService } from '../../data/dataService'
 import type { RentalItem } from '../../data/types'
 import { formatMoney, today } from '../../utils/format'
 import { useDbData } from '../../hooks/useDbData'
+import { isCloudMode } from '../../lib/cloudbase'
 
 const fieldLabel: React.CSSProperties = {
   display: 'block',
@@ -35,7 +36,17 @@ interface QuickCustomerForm {
 
 const emptyQuickCustomer: QuickCustomerForm = { full_name: '', phone: '', address: '', email: '' }
 
+/**
+ * 新建合同路由。cloud 模式为只读阶段：直访 /contracts/new 一律重定向回列表，
+ * 绝不调用本地 reader / writer，也不进入新建流程（本组件在渲染任何 Hook 前即拦截）。
+ */
 export function ContractNew() {
+  const isCloud = isCloudMode()
+  if (isCloud) return <Navigate to="/contracts" replace />
+  return <ContractNewForm />
+}
+
+function ContractNewForm() {
   const navigate = useNavigate()
   const { role, account } = useAuth()
 

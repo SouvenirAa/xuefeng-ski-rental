@@ -11,6 +11,7 @@ dist-ssr/
 *.local
 .env
 .env.*
+!.env.example
 
 # 日志
 logs/

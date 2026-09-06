@@ -27,6 +27,7 @@ import type { ReactElement } from 'react'
 import { useAuth } from '../auth/AuthContext'
 import { menuForRole, roleLabel } from '../auth/permissions'
 import { useDb } from '../data/DbContext'
+import { isCloudMode } from '../lib/cloudbase'
 import { demoTag } from '../theme'
 
 const { Header, Aside, Content } = Layout
@@ -98,17 +99,25 @@ export function AppLayout() {
     })
   }
 
-  const userMenu = [
-    { content: '重置演示数据', value: 'reset', prefixIcon: <RefreshIcon /> },
-    { content: '退出登录', value: 'logout', prefixIcon: <LogoutIcon /> },
-  ]
+  // cloud 模式隐藏「重置演示数据」，仅保留退出登录
+  const userMenu = isCloudMode()
+    ? [{ content: '退出登录', value: 'logout', prefixIcon: <LogoutIcon /> }]
+    : [
+        { content: '重置演示数据', value: 'reset', prefixIcon: <RefreshIcon /> },
+        { content: '退出登录', value: 'logout', prefixIcon: <LogoutIcon /> },
+      ]
 
-  const handleUserAction = (value: string | number) => {
+  const handleUserAction = async (value: string | number) => {
     if (value === 'reset') {
       handleReset()
     } else if (value === 'logout') {
-      logout()
-      navigate('/login', { replace: true })
+      try {
+        await logout()
+        navigate('/login', { replace: true })
+      } catch {
+        // 退出失败：保持登录态，提示错误，不假装已退出
+        MessagePlugin.error('退出登录失败，请稍后重试')
+      }
     }
   }
 
@@ -208,6 +217,21 @@ export function AppLayout() {
             background: 'var(--snowpeak-bg-page)',
           }}
         >
+          {isCloudMode() && (
+            <div
+              style={{
+                marginBottom: 12,
+                padding: '8px 12px',
+                fontSize: 13,
+                color: 'var(--snowpeak-accent)',
+                background: 'var(--snowpeak-accent-subtle)',
+                border: '1px solid var(--snowpeak-accent)',
+                borderRadius: 6,
+              }}
+            >
+              客户列表已接入 CloudBase PostgreSQL；客户写入及其他业务模块仍处于迁移阶段。
+            </div>
+          )}
           <Outlet />
         </Content>
       </Layout>

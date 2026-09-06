@@ -16,9 +16,11 @@ import { AddIcon, ChevronLeftIcon, ChevronRightIcon, DeleteIcon, SearchIcon } fr
 import { PageHeader } from '../../components/PageHeader'
 import { useAuth } from '../../auth/AuthContext'
 import { dataService } from '../../data/dataService'
-import type { Employee, EmployeeInput, Shift, ShiftInput } from '../../data/types'
+import type { EmployeeInput, ShiftInput } from '../../data/types'
+import type { EmployeeView, ShiftView } from '../../data/cloudWorkforce'
+import { isCloudMode } from '../../lib/cloudbase'
+import { useWorkforce } from '../../hooks/useWorkforce'
 import { usePagination } from '../../hooks/usePagination'
-import { useDbData } from '../../hooks/useDbData'
 
 interface EmployeeFormState {
   full_name: string
@@ -78,12 +80,14 @@ const WEEKDAY_LABELS = ['周一', '周二', '周三', '周四', '周五', '周�
 
 export function Employees() {
   const { role } = useAuth()
+  const isCloud = isCloudMode()
+  const { employees, shifts, stores, loading, error, retry } = useWorkforce()
   const [tab, setTab] = useState('employees')
 
   // 员工
   const [keyword, setKeyword] = useState('')
   const [empFormVisible, setEmpFormVisible] = useState(false)
-  const [editingEmployee, setEditingEmployee] = useState<Employee | null>(null)
+  const [editingEmployee, setEditingEmployee] = useState<EmployeeView | null>(null)
   const [empForm, setEmpForm] = useState<EmployeeFormState>(emptyEmployeeForm)
   const [empFieldError, setEmpFieldError] = useState<Record<string, string>>({})
   const [submittingEmployee, setSubmittingEmployee] = useState(false)
@@ -92,14 +96,10 @@ export function Employees() {
   const [weekAnchor, setWeekAnchor] = useState(() => mondayOf(toDateStr(new Date())))
   const [filterStore, setFilterStore] = useState<string>('')
   const [shiftFormVisible, setShiftFormVisible] = useState(false)
-  const [editingShift, setEditingShift] = useState<Shift | null>(null)
+  const [editingShift, setEditingShift] = useState<ShiftView | null>(null)
   const [shiftForm, setShiftForm] = useState<ShiftFormState>(emptyShiftForm)
   const [shiftFieldError, setShiftFieldError] = useState<Record<string, string>>({})
   const [submittingShift, setSubmittingShift] = useState(false)
-
-  const employees = useDbData(() => dataService.listEmployees())
-  const stores = useDbData(() => dataService.listStores())
-  const shifts = useDbData(() => dataService.listShifts())
 
   const storeName = (id: number) => stores.find((s) => s.store_id === id)?.store_name ?? `#${id}`
 
@@ -107,27 +107,29 @@ export function Employees() {
   const filteredEmployees = useMemo(() => {
     if (!keyword.trim()) return employees
     return employees.filter((e) =>
-      `${e.full_name} ${e.phone} ${e.email}`.toLowerCase().includes(keyword.trim().toLowerCase()),
+      `${e.full_name} ${e.phone ?? ''} ${e.email ?? ''}`.toLowerCase().includes(keyword.trim().toLowerCase()),
     )
   }, [employees, keyword])
   const { page, pageSize, setPage, setPageSize, paged, total } = usePagination(filteredEmployees, 10)
 
   const openCreateEmployee = () => {
+    if (isCloud) return
     setEditingEmployee(null)
     setEmpForm(emptyEmployeeForm)
     setEmpFieldError({})
     setEmpFormVisible(true)
   }
 
-  const openEditEmployee = (e: Employee) => {
+  const openEditEmployee = (e: EmployeeView) => {
+    if (isCloud) return
     setEditingEmployee(e)
-    setEmpForm({ full_name: e.full_name, address: e.address, phone: e.phone, email: e.email, notes: e.notes ?? '' })
+    setEmpForm({ full_name: e.full_name, address: e.address ?? '', phone: e.phone ?? '', email: e.email ?? '', notes: e.notes ?? '' })
     setEmpFieldError({})
     setEmpFormVisible(true)
   }
 
   const handleSaveEmployee = () => {
-    if (submittingEmployee || !role) return
+    if (submittingEmployee || !role || isCloud) return
     setSubmittingEmployee(true)
     const result = editingEmployee
       ? dataService.updateEmployee(role, editingEmployee.employee_id, toEmployeeInput(empForm))
@@ -143,39 +145,48 @@ export function Employees() {
     }
   }
 
-  const handleDeleteEmployee = (e: Employee) => {
-    if (!role) return
+  const handleDeleteEmployee = (e: EmployeeView) => {
+    if (!role || isCloud) return
     const result = dataService.removeEmployee(role, e.employee_id)
     if (result.ok) MessagePlugin.success('员工已删除')
     else MessagePlugin.error(result.error)
   }
 
-  const employeeColumns: PrimaryTableCol<Employee>[] = [
+  const employeeColumns: PrimaryTableCol<EmployeeView>[] = [
     { colKey: 'full_name', title: '姓名', width: 140 },
-    { colKey: 'phone', title: '电话', width: 140 },
-    { colKey: 'email', title: '邮箱', ellipsis: true },
-    { colKey: 'notes', title: '备注', ellipsis: true },
+    { colKey: 'phone', title: '电话', width: 140, cell: ({ row }) => row.phone ?? '—' },
+    { colKey: 'email', title: '邮箱', ellipsis: true, cell: ({ row }) => row.email ?? '—' },
+    { colKey: 'notes', title: '备注', ellipsis: true, cell: ({ row }) => row.notes ?? '—' },
     {
       colKey: 'op',
       title: '操作',
       width: 130,
       fixed: 'right',
-      cell: ({ row }) => (
-        <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-          <Button size="small" variant="text" theme="primary" onClick={() => openEditEmployee(row)}>
-            编辑
-          </Button>
-          <Popconfirm
-            content="删除后该员工记录将不可恢复，确认删除？"
-            confirmBtn={{ content: '删除', theme: 'danger' }}
-            onConfirm={() => handleDeleteEmployee(row)}
-          >
-            <Button size="small" variant="text" theme="danger">
-              删除
+      cell: ({ row }) => {
+        if (isCloud) {
+          return (
+            <span style={{ color: 'var(--snowpeak-text-placeholder)', fontSize: 12 }}>
+              云端写入待迁移
+            </span>
+          )
+        }
+        return (
+          <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+            <Button size="small" variant="text" theme="primary" onClick={() => openEditEmployee(row)}>
+              编辑
             </Button>
-          </Popconfirm>
-        </div>
-      ),
+            <Popconfirm
+              content="删除后该员工记录将不可恢复，确认删除？"
+              confirmBtn={{ content: '删除', theme: 'danger' }}
+              onConfirm={() => handleDeleteEmployee(row)}
+            >
+              <Button size="small" variant="text" theme="danger">
+                删除
+              </Button>
+            </Popconfirm>
+          </div>
+        )
+      },
     },
   ]
 
@@ -186,7 +197,7 @@ export function Employees() {
     return days
   }, [weekAnchor])
 
-  const shiftOf = (employeeId: number, date: string): Shift | undefined => {
+  const shiftOf = (employeeId: number, date: string): ShiftView | undefined => {
     return shifts.find((s) => s.employee_id === employeeId && s.work_date === date)
   }
 
@@ -195,13 +206,15 @@ export function Employees() {
   const goThisWeek = () => setWeekAnchor(mondayOf(toDateStr(new Date())))
 
   const openCreateShift = (employeeId: number, date: string) => {
+    if (isCloud) return
     setEditingShift(null)
     setShiftForm({ employee_id: employeeId, store_id: undefined, work_date: date, start_time: '08:00', end_time: '16:00' })
     setShiftFieldError({})
     setShiftFormVisible(true)
   }
 
-  const openEditShift = (s: Shift) => {
+  const openEditShift = (s: ShiftView) => {
+    if (isCloud) return
     setEditingShift(s)
     setShiftForm({ employee_id: s.employee_id, store_id: s.store_id, work_date: s.work_date, start_time: s.start_time, end_time: s.end_time })
     setShiftFieldError({})
@@ -209,7 +222,7 @@ export function Employees() {
   }
 
   const handleSaveShift = () => {
-    if (submittingShift || !role) return
+    if (submittingShift || !role || isCloud) return
     setSubmittingShift(true)
     const input: ShiftInput = {
       employee_id: shiftForm.employee_id as number,
@@ -232,8 +245,8 @@ export function Employees() {
     }
   }
 
-  const handleDeleteShift = (s: Shift) => {
-    if (!role) return
+  const handleDeleteShift = (s: ShiftView) => {
+    if (!role || isCloud) return
     const result = dataService.removeShift(role, s.shift_id)
     if (result.ok) MessagePlugin.success('排班已删除')
     else MessagePlugin.error(result.error)
@@ -241,7 +254,36 @@ export function Employees() {
 
   return (
     <div>
-      <PageHeader title="员工与排班" subtitle="维护员工信息与跨店排班（仅管理员可访问）" />
+      <PageHeader
+        title="员工与排班"
+        subtitle={
+          isCloud
+            ? 'CloudBase PostgreSQL · 只读阶段'
+            : '维护员工信息与跨店排班（仅管理员可访问）'
+        }
+      />
+
+      {isCloud && error && (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            padding: '12px 16px',
+            marginBottom: 12,
+            background: 'var(--snowpeak-bg-container)',
+            border: '1px solid var(--snowpeak-border)',
+            borderRadius: 8,
+            color: 'var(--snowpeak-danger)',
+            fontSize: 13,
+          }}
+        >
+          <span>{error}</span>
+          <Button size="small" variant="outline" onClick={retry}>
+            重试
+          </Button>
+        </div>
+      )}
 
       <Tabs value={tab} onChange={(v) => setTab(String(v))}>
         <Tabs.TabPanel value="employees" label="员工管理">
@@ -255,9 +297,11 @@ export function Employees() {
                 prefixIcon={<SearchIcon />}
                 style={{ width: 280 }}
               />
-              <Button theme="primary" icon={<AddIcon />} onClick={openCreateEmployee}>
-                新增员工
-              </Button>
+              {!isCloud && (
+                <Button theme="primary" icon={<AddIcon />} onClick={openCreateEmployee}>
+                  新增员工
+                </Button>
+              )}
             </div>
             <Table
               data={paged.items}
@@ -265,8 +309,9 @@ export function Employees() {
               rowKey="employee_id"
               size="small"
               hover
+              loading={isCloud && loading}
               tableLayout="fixed"
-              empty={keyword.trim() ? '未找到匹配的员工' : '暂无员工，点击右上角「新增员工」录入'}
+              empty={keyword.trim() ? '未找到匹配的员工' : '暂无员工数据'}
               pagination={{
                 current: page,
                 pageSize,
@@ -314,6 +359,7 @@ export function Employees() {
                 size="small"
                 hover
                 bordered
+                loading={isCloud && loading}
                 tableLayout="fixed"
                 columns={[
                   {
@@ -327,7 +373,7 @@ export function Employees() {
                     colKey: `day-${idx}`,
                     title: `${date.slice(5)} ${WEEKDAY_LABELS[idx]}`,
                     width: 150,
-                    cell: ({ row }: { row: Employee }) => {
+                    cell: ({ row }: { row: EmployeeView }) => {
                       const shift = shiftOf(row.employee_id, date)
                       if (shift) {
                         const inFilter = !filterStore || String(shift.store_id) === filterStore
@@ -338,22 +384,30 @@ export function Employees() {
                             </span>
                           )
                         }
+                        const cardStyle: React.CSSProperties = {
+                          flex: 1,
+                          minWidth: 0,
+                          background: 'var(--snowpeak-primary-subtle)',
+                          color: 'var(--snowpeak-primary)',
+                          borderRadius: 4,
+                          padding: '4px 8px',
+                          fontSize: 12,
+                          whiteSpace: 'nowrap',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                        }
+                        if (isCloud) {
+                          // 只读：不点击编辑、不提供删除
+                          return (
+                            <div style={cardStyle} title={`${storeName(shift.store_id)} ${shift.start_time}-${shift.end_time}`}>
+                              {storeName(shift.store_id)} {shift.start_time}-{shift.end_time}
+                            </div>
+                          )
+                        }
                         return (
                           <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
                             <div
-                              style={{
-                                flex: 1,
-                                minWidth: 0,
-                                background: 'var(--snowpeak-primary-subtle)',
-                                color: 'var(--snowpeak-primary)',
-                                borderRadius: 4,
-                                padding: '4px 8px',
-                                fontSize: 12,
-                                cursor: 'pointer',
-                                whiteSpace: 'nowrap',
-                                overflow: 'hidden',
-                                textOverflow: 'ellipsis',
-                              }}
+                              style={{ ...cardStyle, cursor: 'pointer' }}
                               onClick={() => openEditShift(shift)}
                               title={`${storeName(shift.store_id)} ${shift.start_time}-${shift.end_time}`}
                             >
@@ -375,6 +429,13 @@ export function Employees() {
                           </div>
                         )
                       }
+                      if (isCloud) {
+                        return (
+                          <span style={{ fontSize: 12, color: 'var(--snowpeak-text-placeholder)' }}>
+                            未排班
+                          </span>
+                        )
+                      }
                       return (
                         <Button
                           size="small"
@@ -392,118 +453,124 @@ export function Employees() {
               />
             </div>
             <div style={{ marginTop: 8, fontSize: 12, color: 'var(--snowpeak-text-placeholder)' }}>
-              点击排班卡片可编辑；点击单元格「排班」可为该员工在当天新增班次（08:00–22:00，同员工同日仅一个班次）。
+              {isCloud
+                ? '当前为云端只读阶段，排班数据来自 CloudBase PostgreSQL，仅可查看，暂不支持编辑或新增班次。'
+                : '点击排班卡片可编辑；点击单元格「排班」可为该员工在当天新增班次（08:00–22:00，同员工同日仅一个班次）。'}
             </div>
           </div>
         </Tabs.TabPanel>
       </Tabs>
 
-      {/* 员工表单 Dialog */}
-      <Dialog
-        visible={empFormVisible}
-        header={editingEmployee ? '编辑员工' : '新增员工'}
-        width={480}
-        confirmBtn={{ content: '保存', theme: 'primary', loading: submittingEmployee }}
-        cancelBtn="取消"
-        onConfirm={handleSaveEmployee}
-        onClose={() => setEmpFormVisible(false)}
-      >
-        <div style={{ padding: '8px 0' }}>
-          <div style={{ marginBottom: 16 }}>
-            <label style={fieldLabel}>姓名 <span style={{ color: 'var(--snowpeak-danger)' }}>*</span></label>
-            <Input value={empForm.full_name} onChange={(v) => setEmpForm((p) => ({ ...p, full_name: String(v) }))} placeholder="请输入姓名" status={empFieldError.full_name ? 'error' : 'default'} tips={empFieldError.full_name} />
+      {/* 员工表单 Dialog —— 仅 local */}
+      {!isCloud && (
+        <Dialog
+          visible={empFormVisible}
+          header={editingEmployee ? '编辑员工' : '新增员工'}
+          width={480}
+          confirmBtn={{ content: '保存', theme: 'primary', loading: submittingEmployee }}
+          cancelBtn="取消"
+          onConfirm={handleSaveEmployee}
+          onClose={() => setEmpFormVisible(false)}
+        >
+          <div style={{ padding: '8px 0' }}>
+            <div style={{ marginBottom: 16 }}>
+              <label style={fieldLabel}>姓名 <span style={{ color: 'var(--snowpeak-danger)' }}>*</span></label>
+              <Input value={empForm.full_name} onChange={(v) => setEmpForm((p) => ({ ...p, full_name: String(v) }))} placeholder="请输入姓名" status={empFieldError.full_name ? 'error' : 'default'} tips={empFieldError.full_name} />
+            </div>
+            <div style={{ marginBottom: 16 }}>
+              <label style={fieldLabel}>电话</label>
+              <Input value={empForm.phone} onChange={(v) => setEmpForm((p) => ({ ...p, phone: String(v) }))} placeholder="选填" />
+            </div>
+            <div style={{ marginBottom: 16 }}>
+              <label style={fieldLabel}>邮箱</label>
+              <Input value={empForm.email} onChange={(v) => setEmpForm((p) => ({ ...p, email: String(v) }))} placeholder="选填" />
+            </div>
+            <div style={{ marginBottom: 16 }}>
+              <label style={fieldLabel}>地址</label>
+              <Input value={empForm.address} onChange={(v) => setEmpForm((p) => ({ ...p, address: String(v) }))} placeholder="选填" />
+            </div>
+            <div style={{ marginBottom: 16 }}>
+              <label style={fieldLabel}>备注</label>
+              <Input value={empForm.notes} onChange={(v) => setEmpForm((p) => ({ ...p, notes: String(v) }))} placeholder="选填，如特长" />
+            </div>
           </div>
-          <div style={{ marginBottom: 16 }}>
-            <label style={fieldLabel}>电话</label>
-            <Input value={empForm.phone} onChange={(v) => setEmpForm((p) => ({ ...p, phone: String(v) }))} placeholder="选填" />
-          </div>
-          <div style={{ marginBottom: 16 }}>
-            <label style={fieldLabel}>邮箱</label>
-            <Input value={empForm.email} onChange={(v) => setEmpForm((p) => ({ ...p, email: String(v) }))} placeholder="选填" />
-          </div>
-          <div style={{ marginBottom: 16 }}>
-            <label style={fieldLabel}>地址</label>
-            <Input value={empForm.address} onChange={(v) => setEmpForm((p) => ({ ...p, address: String(v) }))} placeholder="选填" />
-          </div>
-          <div style={{ marginBottom: 16 }}>
-            <label style={fieldLabel}>备注</label>
-            <Input value={empForm.notes} onChange={(v) => setEmpForm((p) => ({ ...p, notes: String(v) }))} placeholder="选填，如特长" />
-          </div>
-        </div>
-      </Dialog>
+        </Dialog>
+      )}
 
-      {/* 排班表单 Dialog */}
-      <Dialog
-        visible={shiftFormVisible}
-        header={editingShift ? '编辑排班' : '新增排班'}
-        width={480}
-        confirmBtn={{ content: '保存', theme: 'primary', loading: submittingShift }}
-        cancelBtn="取消"
-        onConfirm={handleSaveShift}
-        onClose={() => setShiftFormVisible(false)}
-      >
-        <div style={{ padding: '8px 0' }}>
-          <div style={{ marginBottom: 16 }}>
-            <label style={fieldLabel}>员工 <span style={{ color: 'var(--snowpeak-danger)' }}>*</span></label>
-            <Select
-              value={shiftForm.employee_id}
-              onChange={(v) => setShiftForm((p) => ({ ...p, employee_id: v === '' ? undefined : Number(v) }))}
-              placeholder="请选择员工"
-              options={employees.map((e) => ({ label: e.full_name, value: e.employee_id }))}
-              status={shiftFieldError.employee_id ? 'error' : 'default'}
-              tips={shiftFieldError.employee_id}
-              style={{ width: '100%' }}
-            />
-          </div>
-          <div style={{ marginBottom: 16 }}>
-            <label style={fieldLabel}>日期 <span style={{ color: 'var(--snowpeak-danger)' }}>*</span></label>
-            <DatePicker
-              value={shiftForm.work_date || undefined}
-              onChange={(v) => setShiftForm((p) => ({ ...p, work_date: v ? String(v) : '' }))}
-              placeholder="请选择日期"
-              status={shiftFieldError.work_date ? 'error' : 'default'}
-              tips={shiftFieldError.work_date}
-              style={{ width: '100%' }}
-            />
-          </div>
-          <div style={{ marginBottom: 16 }}>
-            <label style={fieldLabel}>门店 <span style={{ color: 'var(--snowpeak-danger)' }}>*</span></label>
-            <Select
-              value={shiftForm.store_id}
-              onChange={(v) => setShiftForm((p) => ({ ...p, store_id: v === '' ? undefined : Number(v) }))}
-              placeholder="请选择门店"
-              options={stores.map((s) => ({ label: s.store_name, value: s.store_id }))}
-              status={shiftFieldError.store_id ? 'error' : 'default'}
-              tips={shiftFieldError.store_id}
-              style={{ width: '100%' }}
-            />
-          </div>
-          <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
-            <div style={{ flex: 1 }}>
-              <label style={fieldLabel}>开始时间 <span style={{ color: 'var(--snowpeak-danger)' }}>*</span></label>
-              <TimePicker
-                value={shiftForm.start_time}
-                onChange={(v) => setShiftForm((p) => ({ ...p, start_time: v ? String(v) : '' }))}
-                format="HH:mm"
-                status={shiftFieldError.start_time ? 'error' : 'default'}
-                tips={shiftFieldError.start_time}
+      {/* 排班表单 Dialog —— 仅 local */}
+      {!isCloud && (
+        <Dialog
+          visible={shiftFormVisible}
+          header={editingShift ? '编辑排班' : '新增排班'}
+          width={480}
+          confirmBtn={{ content: '保存', theme: 'primary', loading: submittingShift }}
+          cancelBtn="取消"
+          onConfirm={handleSaveShift}
+          onClose={() => setShiftFormVisible(false)}
+        >
+          <div style={{ padding: '8px 0' }}>
+            <div style={{ marginBottom: 16 }}>
+              <label style={fieldLabel}>员工 <span style={{ color: 'var(--snowpeak-danger)' }}>*</span></label>
+              <Select
+                value={shiftForm.employee_id}
+                onChange={(v) => setShiftForm((p) => ({ ...p, employee_id: v === '' ? undefined : Number(v) }))}
+                placeholder="请选择员工"
+                options={employees.map((e) => ({ label: e.full_name, value: e.employee_id }))}
+                status={shiftFieldError.employee_id ? 'error' : 'default'}
+                tips={shiftFieldError.employee_id}
                 style={{ width: '100%' }}
               />
             </div>
-            <div style={{ flex: 1 }}>
-              <label style={fieldLabel}>结束时间 <span style={{ color: 'var(--snowpeak-danger)' }}>*</span></label>
-              <TimePicker
-                value={shiftForm.end_time}
-                onChange={(v) => setShiftForm((p) => ({ ...p, end_time: v ? String(v) : '' }))}
-                format="HH:mm"
-                status={shiftFieldError.end_time ? 'error' : 'default'}
-                tips={shiftFieldError.end_time}
+            <div style={{ marginBottom: 16 }}>
+              <label style={fieldLabel}>日期 <span style={{ color: 'var(--snowpeak-danger)' }}>*</span></label>
+              <DatePicker
+                value={shiftForm.work_date || undefined}
+                onChange={(v) => setShiftForm((p) => ({ ...p, work_date: v ? String(v) : '' }))}
+                placeholder="请选择日期"
+                status={shiftFieldError.work_date ? 'error' : 'default'}
+                tips={shiftFieldError.work_date}
                 style={{ width: '100%' }}
               />
             </div>
+            <div style={{ marginBottom: 16 }}>
+              <label style={fieldLabel}>门店 <span style={{ color: 'var(--snowpeak-danger)' }}>*</span></label>
+              <Select
+                value={shiftForm.store_id}
+                onChange={(v) => setShiftForm((p) => ({ ...p, store_id: v === '' ? undefined : Number(v) }))}
+                placeholder="请选择门店"
+                options={stores.map((s) => ({ label: s.store_name, value: s.store_id }))}
+                status={shiftFieldError.store_id ? 'error' : 'default'}
+                tips={shiftFieldError.store_id}
+                style={{ width: '100%' }}
+              />
+            </div>
+            <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
+              <div style={{ flex: 1 }}>
+                <label style={fieldLabel}>开始时间 <span style={{ color: 'var(--snowpeak-danger)' }}>*</span></label>
+                <TimePicker
+                  value={shiftForm.start_time}
+                  onChange={(v) => setShiftForm((p) => ({ ...p, start_time: v ? String(v) : '' }))}
+                  format="HH:mm"
+                  status={shiftFieldError.start_time ? 'error' : 'default'}
+                  tips={shiftFieldError.start_time}
+                  style={{ width: '100%' }}
+                />
+              </div>
+              <div style={{ flex: 1 }}>
+                <label style={fieldLabel}>结束时间 <span style={{ color: 'var(--snowpeak-danger)' }}>*</span></label>
+                <TimePicker
+                  value={shiftForm.end_time}
+                  onChange={(v) => setShiftForm((p) => ({ ...p, end_time: v ? String(v) : '' }))}
+                  format="HH:mm"
+                  status={shiftFieldError.end_time ? 'error' : 'default'}
+                  tips={shiftFieldError.end_time}
+                  style={{ width: '100%' }}
+                />
+              </div>
+            </div>
           </div>
-        </div>
-      </Dialog>
+        </Dialog>
+      )}
     </div>
   )
 }
