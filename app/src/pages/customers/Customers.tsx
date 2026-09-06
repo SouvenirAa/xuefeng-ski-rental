@@ -12,7 +12,6 @@ import {
 import { AddIcon, SearchIcon } from 'tdesign-icons-react'
 import { PageHeader } from '../../components/PageHeader'
 import { useAuth } from '../../auth/AuthContext'
-import { dataService } from '../../data/dataService'
 import { isCloudMode } from '../../lib/cloudbase'
 import { useCustomers } from '../../hooks/useCustomers'
 import type { Customer, CustomerInput } from '../../data/types'
@@ -77,14 +76,14 @@ const fieldLabel: React.CSSProperties = {
 export function Customers() {
   const { role } = useAuth()
   const isCloud = isCloudMode()
-  const { customers: all, loading, error, retry } = useCustomers()
+  const { customers: all, loading, error, retry, create, update, remove, mutating } =
+    useCustomers()
 
   const [keyword, setKeyword] = useState('')
   const [drawerVisible, setDrawerVisible] = useState(false)
   const [editing, setEditing] = useState<Customer | null>(null)
   const [form, setForm] = useState<FormState>(emptyForm)
   const [fieldError, setFieldError] = useState<Record<string, string>>({})
-  const [submitting, setSubmitting] = useState(false)
 
   const filtered = useMemo(() => {
     if (!keyword.trim()) return all
@@ -98,14 +97,12 @@ export function Customers() {
   }
 
   const openCreate = () => {
-    if (isCloud) return
     setEditing(null)
     resetForm()
     setDrawerVisible(true)
   }
 
   const openEdit = (c: Customer) => {
-    if (isCloud) return
     setEditing(c)
     setForm(toForm(c))
     setFieldError({})
@@ -116,13 +113,11 @@ export function Customers() {
     setForm((prev) => ({ ...prev, [key]: value }))
   }
 
-  const handleSave = () => {
-    if (submitting || !role || isCloud) return
-    setSubmitting(true)
+  const handleSave = async () => {
+    if (!role) return
     const result = editing
-      ? dataService.updateCustomer(role, editing.customer_id, toInput(form))
-      : dataService.createCustomer(role, toInput(form))
-    setSubmitting(false)
+      ? await update(editing.customer_id, toInput(form))
+      : await create(toInput(form))
 
     if (result.ok) {
       MessagePlugin.success(editing ? '客户已更新' : '客户已新增')
@@ -137,9 +132,9 @@ export function Customers() {
     }
   }
 
-  const handleDelete = (c: Customer) => {
-    if (!role || isCloud) return
-    const result = dataService.removeCustomer(role, c.customer_id)
+  const handleDelete = async (c: Customer) => {
+    if (!role) return
+    const result = await remove(c.customer_id)
     if (result.ok) {
       MessagePlugin.success('客户已删除')
     } else {
@@ -162,13 +157,6 @@ export function Customers() {
       width: 130,
       fixed: 'right',
       cell: ({ row }) => {
-        if (isCloud) {
-          return (
-            <span style={{ color: 'var(--snowpeak-text-placeholder)', fontSize: 12 }}>
-              云端写入待迁移
-            </span>
-          )
-        }
         return (
           <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
             <Button size="small" variant="text" theme="primary" onClick={() => openEdit(row)}>
@@ -195,7 +183,7 @@ export function Customers() {
         title="客户管理"
         subtitle={
           isCloud
-            ? 'CloudBase PostgreSQL · 只读阶段'
+            ? 'CloudBase PostgreSQL · 云端数据'
             : '登记与查询客户，通过邮箱识别回头客'
         }
       />
@@ -228,11 +216,9 @@ export function Customers() {
             prefixIcon={<SearchIcon />}
             style={{ width: 280 }}
           />
-          {!isCloud && (
-            <Button theme="primary" icon={<AddIcon />} onClick={openCreate}>
-              新增客户
-            </Button>
-          )}
+          <Button theme="primary" icon={<AddIcon />} onClick={openCreate}>
+            新增客户
+          </Button>
         </div>
 
         {/* cloud 查询失败提示 */}
@@ -283,130 +269,132 @@ export function Customers() {
         />
       </div>
 
-      {!isCloud && (
-        <Drawer
-          visible={drawerVisible}
-          header={editing ? '编辑客户' : '新增客户'}
-          size="480px"
-          onClose={() => setDrawerVisible(false)}
-          footer={
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-              <Button variant="outline" onClick={() => setDrawerVisible(false)} style={{ minWidth: 80 }}>
-                取消
-              </Button>
-              <Button theme="primary" loading={submitting} onClick={handleSave} style={{ minWidth: 96 }}>
-                保存
-              </Button>
-            </div>
-          }
-        >
-          <div style={{ padding: '4px 0' }}>
-            <div style={{ marginBottom: 16 }}>
-              <label style={fieldLabel}>
-                姓名 <span style={{ color: 'var(--snowpeak-danger)' }}>*</span>
-              </label>
-              <Input
-                value={form.full_name}
-                onChange={(v) => setField('full_name', String(v))}
-                placeholder="请输入姓名"
-                status={fieldError.full_name ? 'error' : 'default'}
-                tips={fieldError.full_name}
+      <Drawer
+        visible={drawerVisible}
+        header={editing ? '编辑客户' : '新增客户'}
+        size="480px"
+        onClose={() => setDrawerVisible(false)}
+        footer={
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+            <Button variant="outline" onClick={() => setDrawerVisible(false)} style={{ minWidth: 80 }}>
+              取消
+            </Button>
+            <Button theme="primary" loading={mutating} onClick={handleSave} style={{ minWidth: 96 }}>
+              保存
+            </Button>
+          </div>
+        }
+      >
+        <div style={{ padding: '4px 0' }}>
+          <div style={{ marginBottom: 16 }}>
+            <label style={fieldLabel}>
+              姓名 <span style={{ color: 'var(--snowpeak-danger)' }}>*</span>
+            </label>
+            <Input
+              value={form.full_name}
+              onChange={(v) => setField('full_name', String(v))}
+              placeholder="请输入姓名"
+              status={fieldError.full_name ? 'error' : 'default'}
+              tips={fieldError.full_name}
+            />
+          </div>
+
+          <div style={{ marginBottom: 16 }}>
+            <label style={fieldLabel}>
+              电话 <span style={{ color: 'var(--snowpeak-danger)' }}>*</span>
+            </label>
+            <Input
+              value={form.phone}
+              onChange={(v) => setField('phone', String(v))}
+              placeholder="请输入电话"
+              status={fieldError.phone ? 'error' : 'default'}
+              tips={fieldError.phone}
+            />
+          </div>
+
+          <div style={{ marginBottom: 16 }}>
+            <label style={fieldLabel}>邮箱</label>
+            <Input
+              value={form.email}
+              onChange={(v) => setField('email', String(v))}
+              placeholder="选填，用于识别回头客"
+              status={fieldError.email ? 'error' : 'default'}
+              tips={fieldError.email}
+            />
+          </div>
+
+          <div style={{ marginBottom: 16 }}>
+            <label style={fieldLabel}>
+              地址 <span style={{ color: 'var(--snowpeak-danger)' }}>*</span>
+            </label>
+            <Input
+              value={form.address}
+              onChange={(v) => setField('address', String(v))}
+              placeholder="请输入地址"
+              status={fieldError.address ? 'error' : 'default'}
+              tips={fieldError.address}
+            />
+          </div>
+
+          <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
+            <div style={{ flex: 1 }}>
+              <label style={fieldLabel}>出生年份</label>
+              <InputNumber
+                value={form.birth_year}
+                onChange={(v) => setField('birth_year', v as number | undefined)}
+                placeholder="如 1995"
+                theme="normal"
+                decimalPlaces={0}
+                step={1}
+                min={1900}
+                max={2100}
+                status={fieldError.birth_year ? 'error' : 'default'}
+                tips={fieldError.birth_year}
+                style={{ width: '100%' }}
               />
             </div>
-
-            <div style={{ marginBottom: 16 }}>
-              <label style={fieldLabel}>
-                电话 <span style={{ color: 'var(--snowpeak-danger)' }}>*</span>
-              </label>
-              <Input
-                value={form.phone}
-                onChange={(v) => setField('phone', String(v))}
-                placeholder="请输入电话"
-                status={fieldError.phone ? 'error' : 'default'}
-                tips={fieldError.phone}
+            <div style={{ flex: 1 }}>
+              <label style={fieldLabel}>身高(cm)</label>
+              <InputNumber
+                value={form.height_cm}
+                onChange={(v) => setField('height_cm', v as number | undefined)}
+                placeholder="如 170"
+                theme="normal"
+                status={fieldError.height_cm ? 'error' : 'default'}
+                tips={fieldError.height_cm}
+                style={{ width: '100%' }}
               />
-            </div>
-
-            <div style={{ marginBottom: 16 }}>
-              <label style={fieldLabel}>邮箱</label>
-              <Input
-                value={form.email}
-                onChange={(v) => setField('email', String(v))}
-                placeholder="选填，用于识别回头客"
-                status={fieldError.email ? 'error' : 'default'}
-                tips={fieldError.email}
-              />
-            </div>
-
-            <div style={{ marginBottom: 16 }}>
-              <label style={fieldLabel}>
-                地址 <span style={{ color: 'var(--snowpeak-danger)' }}>*</span>
-              </label>
-              <Input
-                value={form.address}
-                onChange={(v) => setField('address', String(v))}
-                placeholder="请输入地址"
-                status={fieldError.address ? 'error' : 'default'}
-                tips={fieldError.address}
-              />
-            </div>
-
-            <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
-              <div style={{ flex: 1 }}>
-                <label style={fieldLabel}>出生年份</label>
-                <InputNumber
-                  value={form.birth_year}
-                  onChange={(v) => setField('birth_year', v as number | undefined)}
-                  placeholder="如 1995"
-                  theme="normal"
-                  status={fieldError.birth_year ? 'error' : 'default'}
-                  tips={fieldError.birth_year}
-                  style={{ width: '100%' }}
-                />
-              </div>
-              <div style={{ flex: 1 }}>
-                <label style={fieldLabel}>身高(cm)</label>
-                <InputNumber
-                  value={form.height_cm}
-                  onChange={(v) => setField('height_cm', v as number | undefined)}
-                  placeholder="如 170"
-                  theme="normal"
-                  status={fieldError.height_cm ? 'error' : 'default'}
-                  tips={fieldError.height_cm}
-                  style={{ width: '100%' }}
-                />
-              </div>
-            </div>
-
-            <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
-              <div style={{ flex: 1 }}>
-                <label style={fieldLabel}>体重(kg)</label>
-                <InputNumber
-                  value={form.weight_kg}
-                  onChange={(v) => setField('weight_kg', v as number | undefined)}
-                  placeholder="如 65"
-                  theme="normal"
-                  status={fieldError.weight_kg ? 'error' : 'default'}
-                  tips={fieldError.weight_kg}
-                  style={{ width: '100%' }}
-                />
-              </div>
-              <div style={{ flex: 1 }}>
-                <label style={fieldLabel}>鞋码</label>
-                <InputNumber
-                  value={form.shoe_size}
-                  onChange={(v) => setField('shoe_size', v as number | undefined)}
-                  placeholder="如 40"
-                  theme="normal"
-                  status={fieldError.shoe_size ? 'error' : 'default'}
-                  tips={fieldError.shoe_size}
-                  style={{ width: '100%' }}
-                />
-              </div>
             </div>
           </div>
-        </Drawer>
-      )}
+
+          <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
+            <div style={{ flex: 1 }}>
+              <label style={fieldLabel}>体重(kg)</label>
+              <InputNumber
+                value={form.weight_kg}
+                onChange={(v) => setField('weight_kg', v as number | undefined)}
+                placeholder="如 65"
+                theme="normal"
+                status={fieldError.weight_kg ? 'error' : 'default'}
+                tips={fieldError.weight_kg}
+                style={{ width: '100%' }}
+              />
+            </div>
+            <div style={{ flex: 1 }}>
+              <label style={fieldLabel}>鞋码</label>
+              <InputNumber
+                value={form.shoe_size}
+                onChange={(v) => setField('shoe_size', v as number | undefined)}
+                placeholder="如 40"
+                theme="normal"
+                status={fieldError.shoe_size ? 'error' : 'default'}
+                tips={fieldError.shoe_size}
+                style={{ width: '100%' }}
+              />
+            </div>
+          </div>
+        </div>
+      </Drawer>
     </div>
   )
 }

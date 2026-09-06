@@ -1393,7 +1393,8 @@ function validateCustomerInput(
     }
   }
   const birth = input.birth_year
-  if (birth !== null && (Number.isNaN(birth) || birth < 1900 || birth > 2100)) {
+  // 出生年份：null 或 1900–2100 之间的有限整数（与 cloud 校验同口径，拒绝小数/NaN/±Infinity/字符串）
+  if (birth !== null && (!Number.isInteger(birth) || birth < 1900 || birth > 2100)) {
     return { ok: false, error: '出生年份需为 1900–2100 之间的整数', field: 'birth_year' }
   }
   if (!inRange(input.height_cm, 30, 260)) {

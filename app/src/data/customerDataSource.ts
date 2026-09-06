@@ -2,9 +2,11 @@
  * 客户列表数据源分派（纯逻辑，可注入计数型 fake reader 做 Node 单测）。
  * 与 useCustomers 中 useDbData(enabled:false) 双重隔离，保证「cloud 模式绝不调用本地 reader」。
  */
-import type { Customer } from './types'
+import type { Customer, OpResult } from './types'
 import { SAFE_CLOUD_ERROR, type CloudReadResult } from './cloudCustomers'
+import type { CustomerRdbMutationClient } from './cloudCustomerMutations'
 import { safeCloudLoad as genericSafeCloudLoad } from './safeCloudLoad'
+import { LatestRequestGuard } from './contractDataSource'
 
 export type CustomerDataMode = 'local' | 'cloud'
 
@@ -61,4 +63,107 @@ export function settleCloudRead(
 ): { customers: Customer[]; error: string | null } {
   if (r.ok) return { customers: r.customers, error: null }
   return { customers: [], error: r.error }
+}
+
+// ---------------------------------------------------------------------------
+// 客户写操作分派（local / cloud 双模式，fail-closed，可独立单测）
+// ---------------------------------------------------------------------------
+
+/**
+ * 按模式分派客户写操作：
+ * - local：调用 localRun 恰好一次（同步 OpResult），绝不触碰 getRdbFn / cloudRun；
+ * - cloud：先求值 getRdbFn（同步 throw 时 fail-closed），再执行 cloudRun；
+ *   cloudRun 的 Promise reject / 内部 SDK error 一律由 cloudRun 自身收口，
+ *   此处兜底 catch 仅处理 getRdbFn 同步 throw 与 cloudRun 意外 reject；
+ *   失败返回 fallback，绝不调用 localRun、绝不回退 DataService/localStorage。
+ * 返回 Promise 永不 reject。
+ */
+export async function dispatchCustomerMutation<T>(
+  mode: CustomerDataMode,
+  getRdbFn: () => CustomerRdbMutationClient,
+  cloudRun: (rdb: CustomerRdbMutationClient) => Promise<T>,
+  localRun: () => T,
+  fallback: T,
+): Promise<T> {
+  if (mode === 'local') {
+    return localRun()
+  }
+  try {
+    const rdb = getRdbFn()
+    return await cloudRun(rdb)
+  } catch {
+    return fallback
+  }
+}
+
+/**
+ * 云端读刷新控制器（可测试纯逻辑，无 React 依赖）。
+ * 封装「mutation 成功后立即失效当前读 token → 触发重读」的顺序语义：
+ * - refreshIfNeeded：仅 cloud 且 result.ok 且 isActive() 为真时才刷新；
+ *   刷新第一步同步 `guard.begin()` 使旧读请求的 token 立即失效
+ *   （旧查询无论何时 resolve 都不能覆盖新结果），第二步调用 refetch
+ *   （Hook 里在其内部先置 loading/error，再 setTick 触发新一轮查询）。
+ * - isActive 由调用方注入（useCustomers 传入 `() => mountedRef.current`）：
+ *   组件已卸载（active=false）时，不失效 token、不推进代次、不 refetch、不写任何状态，
+ *   避免卸载后仍调用 setState / 触发新云查询。
+ * - useCustomers 以 ref 持有唯一实例，测试直接驱动同一实例验证失效顺序与「失败不刷新」。
+ */
+export class CloudCustomerRefresh {
+  private guard: LatestRequestGuard
+  private refetch: () => void
+  private isActive: () => boolean
+  private refreshCount = 0
+
+  constructor(guard: LatestRequestGuard, refetch: () => void, isActive: () => boolean) {
+    this.guard = guard
+    this.refetch = refetch
+    this.isActive = isActive
+  }
+
+  /**
+   * mutation 落地后调用：仅 cloud 且成功且组件仍活跃（isActive()）才刷新；
+   * 失败 / local / 已卸载均不刷新。
+   * 返回原结果，便于调用方透传。
+   */
+  refreshIfNeeded<T>(result: OpResult<T>, isCloud: boolean): OpResult<T> {
+    if (isCloud && result.ok && this.isActive()) {
+      this.guard.begin() // 同步失效当前读 token（旧查询晚到不得覆盖）
+      this.refreshCount += 1
+      this.refetch() // 触发新一轮查询
+    }
+    return result
+  }
+
+  /** 是否为新代次 token（供测试验证旧 token 已失效、新查询可落地）。 */
+  isLatest(token: number): boolean {
+    return this.guard.isLatest(token)
+  }
+
+  /** 触发刷新的次数（供测试断言「成功刷新、失败不刷新」）。 */
+  get refreshes(): number {
+    return this.refreshCount
+  }
+}
+
+/**
+ * 客户写操作互斥锁：防止重复提交（同步 tryAcquire/release，Node 可单测）。
+ * 页面/ Hook 在提交前 tryAcquire，成功后（含失败）release；
+ * 已持锁时再次 tryAcquire 返回 false，调用方据此拒绝重复提交。
+ */
+export class MutationLock {
+  private locked = false
+
+  tryAcquire(): boolean {
+    if (this.locked) return false
+    this.locked = true
+    return true
+  }
+
+  release(): void {
+    this.locked = false
+  }
+
+  get isLocked(): boolean {
+    return this.locked
+  }
 }
