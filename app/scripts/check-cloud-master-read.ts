@@ -47,12 +47,40 @@ type CloudStoreRow = import('../src/data/cloudMaster').CloudStoreRow
 type CloudSkillLevelRow = import('../src/data/cloudMaster').CloudSkillLevelRow
 type CloudRentalItemRow = import('../src/data/cloudMaster').CloudRentalItemRow
 type MasterRdbClient = import('../src/data/cloudMaster').MasterRdbClient
+type RentalItemView = import('../src/data/cloudMaster').RentalItemView
 const {
   dispatchMasterLoad,
   settleMasterRead,
   safeCloudMasterLoad,
+  dispatchMasterMutation,
+  dispatchMasterItemMutation,
+  toLocalItemInput,
+  MutationLock,
+  CloudMasterRefresh,
 } = await import('../src/data/masterDataSource')
 type MasterDataSources = import('../src/data/masterDataSource').MasterDataSources
+const {
+  buildItemPayload,
+  validateItemFields,
+  validateItemBasics,
+  ITEM_CATEGORIES,
+  createItem,
+  updateItem,
+  removeItem,
+  isPositiveSafeInt,
+  SAFE_ITEM_WRITE_ERROR,
+  ITEM_CODE_CONFLICT_ERROR,
+  ITEM_REFERENCE_MISSING_ERROR,
+  ITEM_REFERENCED_ERROR,
+  ITEM_CHECK_VIOLATION_ERROR,
+  ITEM_UPDATE_NOT_FOUND_ERROR,
+  ITEM_DELETE_NOT_FOUND_ERROR,
+} = await import('../src/data/cloudItemMutations')
+type RentalItemCloudInput = import('../src/data/cloudItemMutations').RentalItemCloudInput
+type ItemRdbMutationClient = import('../src/data/cloudItemMutations').ItemRdbMutationClient
+type ItemMutationBuilder = import('../src/data/cloudItemMutations').ItemMutationBuilder
+type ItemCategory = import('../src/data/types').ItemCategory
+const { LatestRequestGuard } = await import('../src/data/contractDataSource')
 const { dataService } = await import('../src/data/dataService')
 const { resolveConfig } = await import('../src/lib/config')
 
@@ -591,6 +619,726 @@ check('local 配置 → mode=local', localCfg.ok === true && localCfg.mode === '
 // ---------------- 12. 证明未读取 .env.local ----------------
 const meta = import.meta as unknown as { env?: unknown }
 check('Node 测试上下文无 import.meta.env（不加载 .env.local）', meta.env === undefined)
+
+// ===========================================================================
+// 13. 设备写操作：payload 归一化与字段校验（纯逻辑）
+// ===========================================================================
+const itemStoreIds = new Set([1, 2])
+const itemLevelIds = new Set([1, 2, 3, 4])
+const testItemInput: RentalItemCloudInput = {
+  item_code: ' SN0037 ',
+  name: ' 测试滑雪板 ',
+  description: ' 测试描述 ',
+  category: '滑雪板',
+  purchase_date: '2025-12-01',
+  purchase_cost: 1000,
+  retail_price: 1500,
+  daily_rate: 120,
+  skill_level_id: 3,
+  home_store_id: 1,
+  current_store_id: 1,
+}
+
+const payload = buildItemPayload(testItemInput)
+check('payload 不含 item_id', !('item_id' in payload))
+check('payload 不含 status', !('status' in payload))
+check('payload 不含 role', !('role' in payload))
+check('payload 不含 uid', !('uid' in payload))
+check('payload 不含 account_id', !('account_id' in payload))
+check('payload 不含 actorRole', !('actorRole' in payload))
+check('payload item_code trim', payload.item_code === 'SN0037')
+check('payload name trim', payload.name === '测试滑雪板')
+check('payload description trim', payload.description === '测试描述')
+check('payload 数值保留', payload.daily_rate === 120 && payload.purchase_cost === 1000)
+
+const nullPayload = buildItemPayload({
+  ...testItemInput,
+  description: null,
+  purchase_date: null,
+  purchase_cost: null,
+  retail_price: null,
+  skill_level_id: null,
+})
+check('payload description=null 保留', nullPayload.description === null)
+check('payload purchase_date=null 保留', nullPayload.purchase_date === null)
+check('payload purchase_cost=null 保留', nullPayload.purchase_cost === null)
+check('payload retail_price=null 保留', nullPayload.retail_price === null)
+check('payload skill_level_id=null 保留', nullPayload.skill_level_id === null)
+const blankPayload = buildItemPayload({ ...testItemInput, description: '   ', purchase_date: '  ' })
+check('payload description 空串 → null', blankPayload.description === null)
+check('payload purchase_date 空串 → null', blankPayload.purchase_date === null)
+
+// 字段校验
+const vCode = validateItemFields({ ...testItemInput, item_code: '  ' }, itemStoreIds, itemLevelIds)
+check('空 item_code → field item_code', vCode.ok === false && vCode.field === 'item_code')
+const vName = validateItemFields({ ...testItemInput, name: '' }, itemStoreIds, itemLevelIds)
+check('空 name → field name', vName.ok === false && vName.field === 'name')
+const vRate = validateItemFields({ ...testItemInput, daily_rate: -1 }, itemStoreIds, itemLevelIds)
+check('daily_rate 负 → field daily_rate', vRate.ok === false && vRate.field === 'daily_rate')
+check('daily_rate NaN → field daily_rate', validateItemFields({ ...testItemInput, daily_rate: NaN }, itemStoreIds, itemLevelIds).ok === false)
+const vCost = validateItemFields({ ...testItemInput, purchase_cost: -5 }, itemStoreIds, itemLevelIds)
+check('purchase_cost 负 → field purchase_cost', vCost.ok === false && vCost.field === 'purchase_cost')
+const vRetail = validateItemFields({ ...testItemInput, retail_price: Infinity }, itemStoreIds, itemLevelIds)
+check('retail_price Infinity → field retail_price', vRetail.ok === false && vRetail.field === 'retail_price')
+const vDate = validateItemFields({ ...testItemInput, purchase_date: '2026-02-30' }, itemStoreIds, itemLevelIds)
+check('purchase_date 非法日期 → field purchase_date', vDate.ok === false && vDate.field === 'purchase_date')
+const vDate2 = validateItemFields({ ...testItemInput, purchase_date: '2025-1-1' }, itemStoreIds, itemLevelIds)
+check('purchase_date 非严格格式 → field purchase_date', vDate2.ok === false && vDate2.field === 'purchase_date')
+const vHome = validateItemFields({ ...testItemInput, home_store_id: 0 }, itemStoreIds, itemLevelIds)
+check('home_store_id=0 → field home_store_id', vHome.ok === false && vHome.field === 'home_store_id')
+const vHomeNot = validateItemFields({ ...testItemInput, home_store_id: 99 }, itemStoreIds, itemLevelIds)
+check('home_store_id 不存在 → field home_store_id', vHomeNot.ok === false && vHomeNot.field === 'home_store_id')
+const vCur = validateItemFields({ ...testItemInput, current_store_id: 99 }, itemStoreIds, itemLevelIds)
+check('current_store_id 不存在 → field current_store_id', vCur.ok === false && vCur.field === 'current_store_id')
+const vAcc = validateItemFields({ ...testItemInput, category: '护目镜', skill_level_id: 3 }, itemStoreIds, itemLevelIds)
+check('配件 skill_level_id 非 null → field skill_level_id', vAcc.ok === false && vAcc.field === 'skill_level_id')
+const vLvl = validateItemFields({ ...testItemInput, skill_level_id: 99 }, itemStoreIds, itemLevelIds)
+check('非配件 skill_level_id 不存在 → field skill_level_id', vLvl.ok === false && vLvl.field === 'skill_level_id')
+check('合法输入校验通过', validateItemFields(testItemInput, itemStoreIds, itemLevelIds).ok === true)
+check('非配件 skill_level_id=null 通过', validateItemFields({ ...testItemInput, skill_level_id: null }, itemStoreIds, itemLevelIds).ok === true)
+check('配件 skill_level_id=null 通过', validateItemFields({ ...testItemInput, category: '头盔', skill_level_id: null }, itemStoreIds, itemLevelIds).ok === true)
+check('purchase_date=null 通过', validateItemFields({ ...testItemInput, purchase_date: null }, itemStoreIds, itemLevelIds).ok === true)
+
+check('isPositiveSafeInt(1)=true', isPositiveSafeInt(1) === true)
+check('isPositiveSafeInt(0)=false', isPositiveSafeInt(0) === false)
+check('isPositiveSafeInt(-1)=false', isPositiveSafeInt(-1) === false)
+check('isPositiveSafeInt(1.5)=false', isPositiveSafeInt(1.5) === false)
+check('isPositiveSafeInt(NaN)=false', isPositiveSafeInt(NaN) === false)
+check('isPositiveSafeInt(MAX_SAFE_INTEGER)=true', isPositiveSafeInt(Number.MAX_SAFE_INTEGER) === true)
+check('isPositiveSafeInt(MAX_SAFE_INTEGER+1)=false', isPositiveSafeInt(Number.MAX_SAFE_INTEGER + 1) === false)
+
+// ===========================================================================
+// 14. 设备写操作：真实调用链（fake RDB 记录 from/insert/update/delete/eq/select）
+// ===========================================================================
+type ItemMutationOutcome =
+  | { kind: 'resolve'; value: { data: unknown; error: unknown } }
+  | { kind: 'reject' }
+interface ItemMutationRecord {
+  table: string | null
+  insertPayload: Record<string, unknown> | null
+  updatePayload: Record<string, unknown> | null
+  deleted: boolean
+  eqColumn: string | null
+  eqValue: unknown
+  selectColumns: string | null
+}
+function emptyItemRecord(): ItemMutationRecord {
+  return {
+    table: null,
+    insertPayload: null,
+    updatePayload: null,
+    deleted: false,
+    eqColumn: null,
+    eqValue: null,
+    selectColumns: null,
+  }
+}
+function makeFakeItemRdb(
+  outcome: ItemMutationOutcome,
+  record: ItemMutationRecord,
+): ItemRdbMutationClient {
+  function makeBuilder(): ItemMutationBuilder {
+    const builder = {} as ItemMutationBuilder
+    builder.eq = (column: string, value: unknown) => {
+      record.eqColumn = column
+      record.eqValue = value
+      return builder
+    }
+    builder.select = (columns: string) => {
+      record.selectColumns = columns
+      return builder
+    }
+    builder.then = (onFulfilled?: (v: { data: unknown; error: unknown }) => unknown, onRejected?: (r: unknown) => unknown) => {
+      if (outcome.kind === 'reject') {
+        return Promise.reject(new Error('sdk-network-internal')).then(onFulfilled, onRejected)
+      }
+      return Promise.resolve(outcome.value).then(onFulfilled, onRejected)
+    }
+    return builder
+  }
+  return {
+    from(table: string) {
+      record.table = table
+      return {
+        insert(values: Record<string, unknown>) {
+          record.insertPayload = values
+          record.updatePayload = null
+          record.deleted = false
+          return makeBuilder()
+        },
+        update(values: Record<string, unknown>) {
+          record.updatePayload = values
+          record.insertPayload = null
+          record.deleted = false
+          return makeBuilder()
+        },
+        delete() {
+          record.deleted = true
+          record.insertPayload = null
+          record.updatePayload = null
+          return makeBuilder()
+        },
+      }
+    },
+  }
+}
+
+const itemOkOutcome: ItemMutationOutcome = {
+  kind: 'resolve',
+  value: { data: [{ ...validItem, status: '在库' }], error: null },
+}
+
+// create：from + insert + select，无 eq；返回 status='在库'
+const recCreate: ItemMutationRecord = emptyItemRecord()
+const createRes = await createItem(makeFakeItemRdb(itemOkOutcome, recCreate), testItemInput, itemStoreIds, itemLevelIds)
+check('create 成功返回 ok', createRes.ok === true)
+check('create 返回 status=在库', createRes.ok === true && createRes.data.status === '在库')
+check('create 使用 rental_items 表', recCreate.table === 'rental_items')
+check('create 走 insert（非 update/delete）', recCreate.insertPayload !== null && recCreate.updatePayload === null && recCreate.deleted === false)
+check('create payload 无越权字段', recCreate.insertPayload !== null && !('item_id' in recCreate.insertPayload) && !('status' in recCreate.insertPayload) && !('role' in recCreate.insertPayload) && !('uid' in recCreate.insertPayload))
+check('create 不设置 eq', recCreate.eqColumn === null)
+check('create select 精确列（非 *）', recCreate.selectColumns === RENTAL_ITEM_SELECT_COLUMNS && !recCreate.selectColumns!.includes('*'))
+
+// create 返回非在库 → fail-closed（不得伪造状态）
+const recCreateBadStatus: ItemMutationRecord = emptyItemRecord()
+const createBadStatus = await createItem(
+  makeFakeItemRdb({ kind: 'resolve', value: { data: [{ ...validItem, status: '借出中' }], error: null } }, recCreateBadStatus),
+  testItemInput,
+  itemStoreIds,
+  itemLevelIds,
+)
+check('create 返回非在库 → fail-closed', createBadStatus.ok === false && createBadStatus.error === SAFE_ITEM_WRITE_ERROR)
+
+// update：from + update + eq(item_id) + select；payload 无 status，返回行 status 为数据库真实状态
+const recUpdate: ItemMutationRecord = emptyItemRecord()
+const updateRes = await updateItem(
+  makeFakeItemRdb({ kind: 'resolve', value: { data: [{ ...validItem, status: '借出中' }], error: null } }, recUpdate),
+  5,
+  testItemInput,
+  itemStoreIds,
+  itemLevelIds,
+)
+check('update 成功返回 ok', updateRes.ok === true)
+check('update 返回数据库真实 status（借出中，不伪造）', updateRes.ok === true && updateRes.data.status === '借出中')
+check('update 使用 rental_items 表', recUpdate.table === 'rental_items')
+check('update 走 update（非 insert/delete）', recUpdate.updatePayload !== null && recUpdate.insertPayload === null && recUpdate.deleted === false)
+check('update payload 无 item_id/status', recUpdate.updatePayload !== null && !('item_id' in recUpdate.updatePayload) && !('status' in recUpdate.updatePayload))
+check('update eq 精确 item_id=5', recUpdate.eqColumn === 'item_id' && recUpdate.eqValue === 5)
+check('update select 精确列（非 *）', recUpdate.selectColumns === RENTAL_ITEM_SELECT_COLUMNS && !recUpdate.selectColumns!.includes('*'))
+
+// remove：from + delete + eq(item_id) + select
+const recRemove: ItemMutationRecord = emptyItemRecord()
+const removeRes = await removeItem(makeFakeItemRdb({ kind: 'resolve', value: { data: [{ ...validItem }], error: null } }, recRemove), 7)
+check('remove 成功返回 ok', removeRes.ok === true)
+check('remove 使用 rental_items 表', recRemove.table === 'rental_items')
+check('remove 走 delete（非 insert/update）', recRemove.deleted === true && recRemove.insertPayload === null && recRemove.updatePayload === null)
+check('remove eq 精确 item_id=7', recRemove.eqColumn === 'item_id' && recRemove.eqValue === 7)
+check('remove select 精确列（非 *）', recRemove.selectColumns === RENTAL_ITEM_SELECT_COLUMNS && !recRemove.selectColumns!.includes('*'))
+
+// 非法 item_id：update/remove 在发起任何查询前 fail-closed
+const recBadId: ItemMutationRecord = emptyItemRecord()
+const updateBadId = await updateItem(makeFakeItemRdb(itemOkOutcome, recBadId), 0, testItemInput, itemStoreIds, itemLevelIds)
+check('update 非法 id(0) → fail-closed 且不查询', updateBadId.ok === false && recBadId.table === null)
+const recBadId2: ItemMutationRecord = emptyItemRecord()
+const removeBadId = await removeItem(makeFakeItemRdb(itemOkOutcome, recBadId2), -1)
+check('remove 非法 id(-1) → fail-closed 且不查询', removeBadId.ok === false && recBadId2.table === null)
+
+// ===========================================================================
+// 15. 影响行数恰好为 1：0 行失败（update/delete 语义不同）、超过 1 行 fail-closed
+// ===========================================================================
+const zeroRows: ItemMutationOutcome = { kind: 'resolve', value: { data: [], error: null } }
+const twoRows: ItemMutationOutcome = {
+  kind: 'resolve',
+  value: { data: [{ ...validItem }, { ...validItem, item_id: 2 }], error: null },
+}
+const createZero = await createItem(makeFakeItemRdb(zeroRows, emptyItemRecord()), testItemInput, itemStoreIds, itemLevelIds)
+check('create 0 行 → 失败', createZero.ok === false && createZero.error === SAFE_ITEM_WRITE_ERROR)
+const createTwo = await createItem(makeFakeItemRdb(twoRows, emptyItemRecord()), testItemInput, itemStoreIds, itemLevelIds)
+check('create >1 行 → fail-closed', createTwo.ok === false && createTwo.error === SAFE_ITEM_WRITE_ERROR)
+
+const updateZero = await updateItem(makeFakeItemRdb(zeroRows, emptyItemRecord()), 5, testItemInput, itemStoreIds, itemLevelIds)
+check('update 0 行 → 不存在或无权限', updateZero.ok === false && updateZero.error === ITEM_UPDATE_NOT_FOUND_ERROR)
+const updateTwo = await updateItem(makeFakeItemRdb(twoRows, emptyItemRecord()), 5, testItemInput, itemStoreIds, itemLevelIds)
+check('update >1 行 → fail-closed', updateTwo.ok === false && updateTwo.error === SAFE_ITEM_WRITE_ERROR)
+
+const removeZero = await removeItem(makeFakeItemRdb(zeroRows, emptyItemRecord()), 7)
+check('remove 0 行 → 不存在/状态变化/无权限', removeZero.ok === false && removeZero.error === ITEM_DELETE_NOT_FOUND_ERROR)
+const removeTwo = await removeItem(makeFakeItemRdb(twoRows, emptyItemRecord()), 7)
+check('remove >1 行 → fail-closed', removeTwo.ok === false && removeTwo.error === SAFE_ITEM_WRITE_ERROR)
+
+// ===========================================================================
+// 16. 安全错误映射：23505 / 23503（写 vs 删）/ 23514 / 42501 / 其他
+// ===========================================================================
+function errOutcome(code: string, message: string): ItemMutationOutcome {
+  return {
+    kind: 'resolve',
+    value: { data: null, error: { code, message, details: 'secret-details', hint: 'secret-hint' } },
+  }
+}
+const createDup = await createItem(makeFakeItemRdb(errOutcome('23505', 'dup'), emptyItemRecord()), testItemInput, itemStoreIds, itemLevelIds)
+check('23505 → 库存编号冲突', createDup.ok === false && createDup.error === ITEM_CODE_CONFLICT_ERROR && createDup.field === 'item_code')
+check('23505 不泄露底层 details', createDup.ok === false && !createDup.error.includes('dup') && !createDup.error.includes('secret'))
+
+const createFk = await createItem(makeFakeItemRdb(errOutcome('23503', 'fk'), emptyItemRecord()), testItemInput, itemStoreIds, itemLevelIds)
+check('23503 写 → 门店/技能等级不存在', createFk.ok === false && createFk.error === ITEM_REFERENCE_MISSING_ERROR)
+const updateFk = await updateItem(makeFakeItemRdb(errOutcome('23503', 'fk'), emptyItemRecord()), 5, testItemInput, itemStoreIds, itemLevelIds)
+check('23503 update → 门店/技能等级不存在', updateFk.ok === false && updateFk.error === ITEM_REFERENCE_MISSING_ERROR)
+const removeFk = await removeItem(makeFakeItemRdb(errOutcome('23503', 'fk'), emptyItemRecord()), 1)
+check('23503 删 → 设备被引用', removeFk.ok === false && removeFk.error === ITEM_REFERENCED_ERROR)
+check('23503 不泄露表结构', removeFk.ok === false && !removeFk.error.includes('fk') && !removeFk.error.includes('secret'))
+
+const createCheck = await createItem(makeFakeItemRdb(errOutcome('23514', 'check'), emptyItemRecord()), testItemInput, itemStoreIds, itemLevelIds)
+check('23514 → CHECK 违例', createCheck.ok === false && createCheck.error === ITEM_CHECK_VIOLATION_ERROR)
+const createRls = await createItem(makeFakeItemRdb(errOutcome('42501', 'rls'), emptyItemRecord()), testItemInput, itemStoreIds, itemLevelIds)
+check('42501 → 无权限', createRls.ok === false && createRls.error === '无权限执行该操作')
+const createOther = await createItem(makeFakeItemRdb(errOutcome('XX000', 'internal-secret'), emptyItemRecord()), testItemInput, itemStoreIds, itemLevelIds)
+check('其他错误 → 统一安全文案', createOther.ok === false && createOther.error === SAFE_ITEM_WRITE_ERROR)
+check('其他错误不泄露底层细节', createOther.ok === false && !createOther.error.includes('secret') && !createOther.error.includes('internal'))
+const createReject = await createItem(makeFakeItemRdb({ kind: 'reject' }, emptyItemRecord()), testItemInput, itemStoreIds, itemLevelIds)
+check('SDK Promise reject → 安全错误', createReject.ok === false && createReject.error === SAFE_ITEM_WRITE_ERROR)
+
+// 非法字段不得调用 RDB（校验层在发起任何查询前 fail-closed）
+const recBadField: ItemMutationRecord = emptyItemRecord()
+const createBadField = await createItem(
+  makeFakeItemRdb(itemOkOutcome, recBadField),
+  { ...testItemInput, purchase_date: '2026-02-30' },
+  itemStoreIds,
+  itemLevelIds,
+)
+check('create 非法日期 → 拒绝且不调用 RDB', createBadField.ok === false && createBadField.field === 'purchase_date' && recBadField.table === null)
+
+// ===========================================================================
+// 17. 写操作分派：模式隔离 + getRdb 同步 throw / reject / 失败不回退本地
+// ===========================================================================
+let localItemCreateCalls = 0
+let cloudItemCreateCalls = 0
+let getRdbCalls = 0
+const fakeCreatedView = { ...fakeItem, item_id: 1 } as unknown as RentalItemView
+
+const dispCloudCreate = await dispatchMasterMutation(
+  'cloud',
+  () => {
+    getRdbCalls++
+    return makeFakeItemRdb(itemOkOutcome, emptyItemRecord())
+  },
+  async (rdb) => {
+    cloudItemCreateCalls++
+    return createItem(rdb, testItemInput, itemStoreIds, itemLevelIds)
+  },
+  () => {
+    localItemCreateCalls++
+    return { ok: true as const, data: fakeCreatedView }
+  },
+  { ok: false as const, error: SAFE_ITEM_WRITE_ERROR },
+)
+check('cloud 写不调用 localRun', localItemCreateCalls === 0)
+check('cloud 写调用 cloudRun 一次', cloudItemCreateCalls === 1)
+check('cloud 写调用 getRdb 一次', getRdbCalls === 1)
+check('cloud 写成功返回 ok', dispCloudCreate.ok === true)
+
+localItemCreateCalls = 0
+const dispSyncThrowCreate = await dispatchMasterMutation(
+  'cloud',
+  () => {
+    throw new Error('getRdb-sync-internal')
+  },
+  async () => {
+    cloudItemCreateCalls++
+    return { ok: true as const, data: fakeCreatedView }
+  },
+  () => {
+    localItemCreateCalls++
+    return { ok: true as const, data: fakeCreatedView }
+  },
+  { ok: false as const, error: SAFE_ITEM_WRITE_ERROR },
+)
+check('getRdb 同步 throw → 安全错误', dispSyncThrowCreate.ok === false && dispSyncThrowCreate.error === SAFE_ITEM_WRITE_ERROR)
+check('getRdb 同步 throw → 不调用 localRun', localItemCreateCalls === 0)
+
+localItemCreateCalls = 0
+const dispRejectCreate = await dispatchMasterMutation(
+  'cloud',
+  () => ({} as ItemRdbMutationClient),
+  async () => {
+    throw new Error('cloud-reject-internal')
+  },
+  () => {
+    localItemCreateCalls++
+    return { ok: true as const, data: fakeCreatedView }
+  },
+  { ok: false as const, error: SAFE_ITEM_WRITE_ERROR },
+)
+check('cloudRun reject → 安全错误', dispRejectCreate.ok === false && dispRejectCreate.error === SAFE_ITEM_WRITE_ERROR)
+check('cloudRun reject → 不调用 localRun', localItemCreateCalls === 0)
+
+localItemCreateCalls = 0
+cloudItemCreateCalls = 0
+getRdbCalls = 0
+const dispLocalCreate = await dispatchMasterMutation(
+  'local',
+  () => {
+    getRdbCalls++
+    return {} as ItemRdbMutationClient
+  },
+  async () => {
+    cloudItemCreateCalls++
+    return { ok: true as const, data: fakeCreatedView }
+  },
+  () => {
+    localItemCreateCalls++
+    return { ok: true as const, data: fakeCreatedView }
+  },
+  { ok: false as const, error: SAFE_ITEM_WRITE_ERROR },
+)
+check('local 写调用 localRun 一次', localItemCreateCalls === 1)
+check('local 写不调用 getRdb / cloudRun', getRdbCalls === 0 && cloudItemCreateCalls === 0)
+check('local 写返回 localRun 结果', dispLocalCreate.ok === true)
+
+// ===========================================================================
+// 18. local/cloud 输入转换边界：cloud 可空 → local 非空
+// ===========================================================================
+const localConverted = toLocalItemInput({
+  ...testItemInput,
+  description: null,
+  purchase_date: null,
+  purchase_cost: null,
+  retail_price: null,
+})
+check('toLocalItemInput description null → ""', localConverted.description === '')
+check('toLocalItemInput purchase_date null → ""', localConverted.purchase_date === '')
+check('toLocalItemInput purchase_cost null → 0', localConverted.purchase_cost === 0)
+check('toLocalItemInput retail_price null → 0', localConverted.retail_price === 0)
+check('toLocalItemInput 非空字段原样透传', localConverted.item_code === testItemInput.item_code && localConverted.daily_rate === 120 && localConverted.skill_level_id === 3)
+
+// ===========================================================================
+// 19. 并发：MutationLock 防重复提交 + CloudMasterRefresh 旧 token 失效 / 卸载不刷新
+// ===========================================================================
+const itemLock = new MutationLock()
+check('MutationLock 首次 tryAcquire=true', itemLock.tryAcquire() === true)
+check('MutationLock 已持锁 isLocked=true', itemLock.isLocked === true)
+check('MutationLock 重复 tryAcquire=false（防重复提交）', itemLock.tryAcquire() === false)
+itemLock.release()
+check('MutationLock release 后 isLocked=false', itemLock.isLocked === false)
+check('MutationLock release 后可重入', itemLock.tryAcquire() === true)
+itemLock.release()
+
+{
+  const refreshGuard = new LatestRequestGuard()
+  let refetchCalls = 0
+  let active = false
+  const refresher = new CloudMasterRefresh(
+    refreshGuard,
+    () => {
+      refetchCalls++
+    },
+    () => active,
+  )
+  const okResult = { ok: true as const, data: fakeCreatedView }
+  const inFlightToken = refreshGuard.begin()
+
+  // active=false + cloud success → refetch 0 次、token 不推进
+  const returned = refresher.refreshIfNeeded(okResult, true)
+  check('active=false + cloud 成功：透传原结果', returned === okResult)
+  check('active=false + cloud 成功：refetch 0 次', refetchCalls === 0)
+  check('active=false：在途 token 仍最新（代次未推进）', refreshGuard.isLatest(inFlightToken) === true)
+  check('active=false：刷新计数 = 0', refresher.refreshes === 0)
+
+  // active=true + cloud success → 旧 token 立即失效、refetch 1 次
+  active = true
+  const beforeRefreshToken = refreshGuard.begin()
+  refresher.refreshIfNeeded(okResult, true)
+  check('active=true + cloud 成功：旧 token 立即失效', refreshGuard.isLatest(beforeRefreshToken) === false)
+  check('active=true + cloud 成功：refetch 1 次', refetchCalls === 1)
+  check('active=true + cloud 成功：刷新计数 = 1', refresher.refreshes === 1)
+
+  // 失败 / local 仍不刷新
+  refetchCalls = 0
+  refresher.refreshIfNeeded({ ok: false as const, error: SAFE_ITEM_WRITE_ERROR }, true)
+  check('active=true + 失败：不触发 refetch', refetchCalls === 0)
+  refresher.refreshIfNeeded(okResult, false)
+  check('active=true + local：不触发 refetch', refetchCalls === 0)
+  check('active=true + 失败/local：刷新计数不变 = 1', refresher.refreshes === 1)
+}
+
+// ===========================================================================
+// 20. local 设备 CRUD 行为不回归
+// ===========================================================================
+const localItemBefore = dataService.listItems().length
+const localCreated = dataService.createItem('admin', {
+  item_code: 'SN9999',
+  name: '回归测试设备',
+  description: '',
+  category: '滑雪板',
+  purchase_date: '',
+  purchase_cost: 0,
+  retail_price: 0,
+  daily_rate: 10,
+  skill_level_id: null,
+  home_store_id: 1,
+  current_store_id: 1,
+})
+check('local createItem 成功', localCreated.ok === true)
+if (localCreated.ok) {
+  const tmpItemId = localCreated.data.item_id
+  check('local create 后行数 +1', dataService.listItems().length === localItemBefore + 1)
+  const localUpd = dataService.updateItem('admin', tmpItemId, {
+    item_code: 'SN9999',
+    name: '回归测试设备2',
+    description: '',
+    category: '滑雪板',
+    purchase_date: '',
+    purchase_cost: 0,
+    retail_price: 0,
+    daily_rate: 10,
+    skill_level_id: null,
+    home_store_id: 1,
+    current_store_id: 1,
+  })
+  check('local updateItem 成功', localUpd.ok === true)
+  const localRm = dataService.removeItem('admin', tmpItemId)
+  check('local removeItem 成功', localRm.ok === true)
+  check('local remove 后行数恢复', dataService.listItems().length === localItemBefore)
+}
+check(
+  'local staff createItem 被权限拒绝',
+  dataService.createItem('staff', {
+    item_code: 'SN9998',
+    name: '越权设备',
+    description: '',
+    category: '滑雪板',
+    purchase_date: '',
+    purchase_cost: 0,
+    retail_price: 0,
+    daily_rate: 10,
+    skill_level_id: null,
+    home_store_id: 1,
+    current_store_id: 1,
+  }).ok === false,
+)
+
+// ===========================================================================
+// 21. 日租金必填语义 + category 运行时枚举校验（补漏二）
+// ===========================================================================
+
+// 21a. 日租金必填（validateItemBasics / validateItemFields 同口径）
+const basicsRateNull = validateItemBasics({ ...testItemInput, daily_rate: null })
+check('validateItemBasics daily_rate null → field daily_rate', basicsRateNull.ok === false && basicsRateNull.field === 'daily_rate' && basicsRateNull.error === '日租金不能为空')
+const basicsRateUndef = validateItemBasics({ ...testItemInput, daily_rate: undefined as unknown as number | null })
+check('validateItemBasics daily_rate undefined → field daily_rate', basicsRateUndef.ok === false && basicsRateUndef.field === 'daily_rate')
+check('validateItemBasics daily_rate=0 → 合法', validateItemBasics({ ...testItemInput, daily_rate: 0 }).ok === true)
+const fieldsRateNull = validateItemFields({ ...testItemInput, daily_rate: null }, itemStoreIds, itemLevelIds)
+check('validateItemFields daily_rate null → field daily_rate', fieldsRateNull.ok === false && fieldsRateNull.field === 'daily_rate')
+
+// 21b. create/update 的 daily_rate 为 null/undefined → 失败且 RDB 调用 0 次
+const recRateNullCreate: ItemMutationRecord = emptyItemRecord()
+const createRateNull = await createItem(makeFakeItemRdb(itemOkOutcome, recRateNullCreate), { ...testItemInput, daily_rate: null }, itemStoreIds, itemLevelIds)
+check('create daily_rate=null → 失败', createRateNull.ok === false && createRateNull.field === 'daily_rate')
+check('create daily_rate=null → RDB 调用 0 次', recRateNullCreate.table === null)
+const recRateUndefCreate: ItemMutationRecord = emptyItemRecord()
+const createRateUndef = await createItem(makeFakeItemRdb(itemOkOutcome, recRateUndefCreate), { ...testItemInput, daily_rate: undefined as unknown as number | null }, itemStoreIds, itemLevelIds)
+check('create daily_rate=undefined → 失败', createRateUndef.ok === false && createRateUndef.field === 'daily_rate')
+check('create daily_rate=undefined → RDB 调用 0 次', recRateUndefCreate.table === null)
+const recRateNullUpdate: ItemMutationRecord = emptyItemRecord()
+const updateRateNull = await updateItem(makeFakeItemRdb(itemOkOutcome, recRateNullUpdate), 5, { ...testItemInput, daily_rate: null }, itemStoreIds, itemLevelIds)
+check('update daily_rate=null → 失败', updateRateNull.ok === false && updateRateNull.field === 'daily_rate')
+check('update daily_rate=null → RDB 调用 0 次', recRateNullUpdate.table === null)
+const recRateUndefUpdate: ItemMutationRecord = emptyItemRecord()
+const updateRateUndef = await updateItem(makeFakeItemRdb(itemOkOutcome, recRateUndefUpdate), 5, { ...testItemInput, daily_rate: undefined as unknown as number | null }, itemStoreIds, itemLevelIds)
+check('update daily_rate=undefined → 失败', updateRateUndef.ok === false && updateRateUndef.field === 'daily_rate')
+check('update daily_rate=undefined → RDB 调用 0 次', recRateUndefUpdate.table === null)
+
+// 显式 0 合法：走真实调用链，RDB 被调用且返回在库
+const recRateZero: ItemMutationRecord = emptyItemRecord()
+const createRateZero = await createItem(makeFakeItemRdb(itemOkOutcome, recRateZero), { ...testItemInput, daily_rate: 0 }, itemStoreIds, itemLevelIds)
+check('create daily_rate=0 → 成功（RDB 被调用）', createRateZero.ok === true && recRateZero.table === 'rental_items')
+
+// 21c. local 空日租金：不调用 DataService 写入，设备数量及内容不变
+const localCountBefore = dataService.listItems().length
+const localIdsBefore = dataService.listItems().map((i) => i.item_id).join(',')
+
+let toLocalThrew = false
+try {
+  toLocalItemInput({ ...testItemInput, daily_rate: null })
+} catch {
+  toLocalThrew = true
+}
+check('toLocalItemInput 空日租金 fail-closed（抛错，不静默转 0）', toLocalThrew === true)
+
+// 复现 useMasterData localRun 的写入边界：basics 未通过 → 返回字段错误，绝不调用 dataService
+let localWriteCalls = 0
+const runLocalCreate = (input: RentalItemCloudInput): { ok: boolean; error?: string; field?: string } => {
+  const basics = validateItemBasics(input)
+  if (!basics.ok) return { ok: false, error: basics.error, field: basics.field }
+  localWriteCalls++
+  const r = dataService.createItem('admin', toLocalItemInput(input))
+  return r.ok ? { ok: true } : { ok: false, error: r.error, field: r.field }
+}
+const localEmpty = runLocalCreate({ ...testItemInput, daily_rate: null })
+check('local 空日租金：basics 返回字段错误', localEmpty.ok === false && localEmpty.field === 'daily_rate')
+check('local 空日租金：不调用 DataService 写入', localWriteCalls === 0)
+check('local 空日租金：设备数量不变', dataService.listItems().length === localCountBefore)
+check('local 空日租金：设备内容不变', dataService.listItems().map((i) => i.item_id).join(',') === localIdsBefore)
+
+// 21d. category 运行时枚举校验（不依赖 TS 类型 / 页面 Select / 数据库 CHECK）
+const fieldsCatBad = validateItemFields({ ...testItemInput, category: '滑板车' as ItemCategory }, itemStoreIds, itemLevelIds)
+check('validateItemFields category 非法 → field category', fieldsCatBad.ok === false && fieldsCatBad.field === 'category' && fieldsCatBad.error === '类别不合法')
+const recCatCreate: ItemMutationRecord = emptyItemRecord()
+const createCatBad = await createItem(makeFakeItemRdb(itemOkOutcome, recCatCreate), { ...testItemInput, category: '滑板车' as ItemCategory }, itemStoreIds, itemLevelIds)
+check('create category 非法 → 失败', createCatBad.ok === false && createCatBad.field === 'category')
+check('create category 非法 → RDB 调用 0 次', recCatCreate.table === null)
+const recCatUpdate: ItemMutationRecord = emptyItemRecord()
+const updateCatBad = await updateItem(makeFakeItemRdb(itemOkOutcome, recCatUpdate), 5, { ...testItemInput, category: '雪圈' as ItemCategory }, itemStoreIds, itemLevelIds)
+check('update category 非法 → 失败', updateCatBad.ok === false && updateCatBad.field === 'category')
+check('update category 非法 → RDB 调用 0 次', recCatUpdate.table === null)
+
+// 六种合法类别全部通过完整校验
+for (const c of ITEM_CATEGORIES) {
+  const isAcc = c === '护目镜' || c === '头盔'
+  const input = { ...testItemInput, category: c, skill_level_id: isAcc ? null : 3 }
+  check(`合法类别 ${c} 通过 validateItemFields`, validateItemFields(input, itemStoreIds, itemLevelIds).ok === true)
+}
+
+// ===========================================================================
+// 22. cloud create/update 前置校验：validateItemFields 在 getRdb/cloudRun 之前
+//     （计数型 getRdbFn/cloudRun/localRun/from 验证调用次数，非仅检查 rec.table）
+// ===========================================================================
+function makeCountingItemDispatch() {
+  const calls = { getRdb: 0, cloudRun: 0, localRun: 0, from: 0 }
+  const getRdbFn = (): ItemRdbMutationClient => {
+    calls.getRdb++
+    const inner = makeFakeItemRdb(itemOkOutcome, emptyItemRecord())
+    return {
+      from(table: string) {
+        calls.from++
+        return inner.from(table)
+      },
+    }
+  }
+  const localRun = () => {
+    calls.localRun++
+    return { ok: true as const, data: fakeCreatedView }
+  }
+  return { calls, getRdbFn, localRun }
+}
+
+// 22a. 有效 create：getRdb / cloudRun 各 1 次，localRun 0 次，from 1 次
+{
+  const env = makeCountingItemDispatch()
+  const res = await dispatchMasterItemMutation(
+    'cloud', testItemInput, itemStoreIds, itemLevelIds,
+    env.getRdbFn,
+    async (rdb) => { env.calls.cloudRun++; return createItem(rdb, testItemInput, itemStoreIds, itemLevelIds) },
+    env.localRun,
+  )
+  check('cloud create 有效输入 → ok', res.ok === true)
+  check('cloud create 有效输入 → getRdb 1 次', env.calls.getRdb === 1)
+  check('cloud create 有效输入 → cloudRun 1 次', env.calls.cloudRun === 1)
+  check('cloud create 有效输入 → localRun 0 次', env.calls.localRun === 0)
+  check('cloud create 有效输入 → rdb.from 1 次', env.calls.from === 1)
+}
+
+// 22b. 有效 update：getRdb / cloudRun 各 1 次，localRun 0 次，from 1 次
+{
+  const env = makeCountingItemDispatch()
+  const res = await dispatchMasterItemMutation(
+    'cloud', testItemInput, itemStoreIds, itemLevelIds,
+    env.getRdbFn,
+    async (rdb) => { env.calls.cloudRun++; return updateItem(rdb, 5, testItemInput, itemStoreIds, itemLevelIds) },
+    env.localRun,
+  )
+  check('cloud update 有效输入 → ok', res.ok === true)
+  check('cloud update 有效输入 → getRdb 1 次', env.calls.getRdb === 1)
+  check('cloud update 有效输入 → cloudRun 1 次', env.calls.cloudRun === 1)
+  check('cloud update 有效输入 → localRun 0 次', env.calls.localRun === 0)
+  check('cloud update 有效输入 → rdb.from 1 次', env.calls.from === 1)
+}
+
+// 22c. create 空日租金(null) → 字段错误，getRdb/cloudRun/localRun/from 全 0 次
+{
+  const env = makeCountingItemDispatch()
+  const bad = { ...testItemInput, daily_rate: null }
+  const res = await dispatchMasterItemMutation(
+    'cloud', bad, itemStoreIds, itemLevelIds,
+    env.getRdbFn,
+    async (rdb) => { env.calls.cloudRun++; return createItem(rdb, bad, itemStoreIds, itemLevelIds) },
+    env.localRun,
+  )
+  check('cloud create 空日租金(null) → field daily_rate', res.ok === false && res.field === 'daily_rate')
+  check('cloud create 空日租金(null) → getRdb 0 次', env.calls.getRdb === 0)
+  check('cloud create 空日租金(null) → cloudRun 0 次', env.calls.cloudRun === 0)
+  check('cloud create 空日租金(null) → localRun 0 次', env.calls.localRun === 0)
+  check('cloud create 空日租金(null) → rdb.from 0 次', env.calls.from === 0)
+}
+
+// 22d. create 空日租金(undefined) → 字段错误，全 0 次
+{
+  const env = makeCountingItemDispatch()
+  const bad = { ...testItemInput, daily_rate: undefined as unknown as number | null }
+  const res = await dispatchMasterItemMutation(
+    'cloud', bad, itemStoreIds, itemLevelIds,
+    env.getRdbFn,
+    async (rdb) => { env.calls.cloudRun++; return createItem(rdb, bad, itemStoreIds, itemLevelIds) },
+    env.localRun,
+  )
+  check('cloud create 空日租金(undefined) → field daily_rate', res.ok === false && res.field === 'daily_rate')
+  check('cloud create 空日租金(undefined) → getRdb/cloudRun/from 0 次', env.calls.getRdb === 0 && env.calls.cloudRun === 0 && env.calls.from === 0)
+}
+
+// 22e. update 空日租金(null) → 字段错误，全 0 次
+{
+  const env = makeCountingItemDispatch()
+  const bad = { ...testItemInput, daily_rate: null }
+  const res = await dispatchMasterItemMutation(
+    'cloud', bad, itemStoreIds, itemLevelIds,
+    env.getRdbFn,
+    async (rdb) => { env.calls.cloudRun++; return updateItem(rdb, 5, bad, itemStoreIds, itemLevelIds) },
+    env.localRun,
+  )
+  check('cloud update 空日租金(null) → field daily_rate', res.ok === false && res.field === 'daily_rate')
+  check('cloud update 空日租金(null) → getRdb/cloudRun/localRun/from 0 次', env.calls.getRdb === 0 && env.calls.cloudRun === 0 && env.calls.localRun === 0 && env.calls.from === 0)
+}
+
+// 22f. create 非法 category → 字段错误，全 0 次
+{
+  const env = makeCountingItemDispatch()
+  const bad = { ...testItemInput, category: '滑板车' as ItemCategory }
+  const res = await dispatchMasterItemMutation(
+    'cloud', bad, itemStoreIds, itemLevelIds,
+    env.getRdbFn,
+    async (rdb) => { env.calls.cloudRun++; return createItem(rdb, bad, itemStoreIds, itemLevelIds) },
+    env.localRun,
+  )
+  check('cloud create 非法 category → field category', res.ok === false && res.field === 'category')
+  check('cloud create 非法 category → getRdb/cloudRun/from 0 次', env.calls.getRdb === 0 && env.calls.cloudRun === 0 && env.calls.from === 0)
+}
+
+// 22g. update 非法 category → 字段错误，全 0 次
+{
+  const env = makeCountingItemDispatch()
+  const bad = { ...testItemInput, category: '雪圈' as ItemCategory }
+  const res = await dispatchMasterItemMutation(
+    'cloud', bad, itemStoreIds, itemLevelIds,
+    env.getRdbFn,
+    async (rdb) => { env.calls.cloudRun++; return updateItem(rdb, 5, bad, itemStoreIds, itemLevelIds) },
+    env.localRun,
+  )
+  check('cloud update 非法 category → field category', res.ok === false && res.field === 'category')
+  check('cloud update 非法 category → getRdb/cloudRun/from 0 次', env.calls.getRdb === 0 && env.calls.cloudRun === 0 && env.calls.from === 0)
+}
+
+// 22h. local 模式：不经 cloud 校验、不触碰 getRdb/cloudRun/from，直接走 localRun（行为不回归）
+{
+  const env = makeCountingItemDispatch()
+  const res = await dispatchMasterItemMutation(
+    'local', testItemInput, itemStoreIds, itemLevelIds,
+    env.getRdbFn,
+    async (rdb) => { env.calls.cloudRun++; return createItem(rdb, testItemInput, itemStoreIds, itemLevelIds) },
+    env.localRun,
+  )
+  check('local 模式 → localRun 1 次', env.calls.localRun === 1)
+  check('local 模式 → getRdb/cloudRun/from 0 次', env.calls.getRdb === 0 && env.calls.cloudRun === 0 && env.calls.from === 0)
+  check('local 模式 → 透传 localRun 结果', res.ok === true)
+}
 
 console.log(`\n通过 ${passed} / ${passed + failed}`)
 if (failed > 0) {
