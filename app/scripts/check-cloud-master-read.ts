@@ -54,7 +54,10 @@ const {
   safeCloudMasterLoad,
   dispatchMasterMutation,
   dispatchMasterItemMutation,
+  dispatchMasterStoreMutation,
+  dispatchMasterStoreIdMutation,
   toLocalItemInput,
+  toLocalStoreInput,
   MutationLock,
   CloudMasterRefresh,
 } = await import('../src/data/masterDataSource')
@@ -80,6 +83,23 @@ type RentalItemCloudInput = import('../src/data/cloudItemMutations').RentalItemC
 type ItemRdbMutationClient = import('../src/data/cloudItemMutations').ItemRdbMutationClient
 type ItemMutationBuilder = import('../src/data/cloudItemMutations').ItemMutationBuilder
 type ItemCategory = import('../src/data/types').ItemCategory
+const {
+  buildStorePayload,
+  validateStoreFields,
+  createStore,
+  updateStore,
+  removeStore,
+  SAFE_STORE_WRITE_ERROR,
+  STORE_REFERENCED_ERROR,
+  STORE_CHECK_VIOLATION_ERROR,
+  STORE_UPDATE_NOT_FOUND_ERROR,
+  STORE_DELETE_NOT_FOUND_ERROR,
+  STORE_PERMISSION_ERROR,
+} = await import('../src/data/cloudStoreMutations')
+type StoreCloudInput = import('../src/data/cloudStoreMutations').StoreCloudInput
+type StoreRdbMutationClient = import('../src/data/cloudStoreMutations').StoreRdbMutationClient
+type StoreMutationBuilder = import('../src/data/cloudStoreMutations').StoreMutationBuilder
+type OpResult = import('../src/data/types').OpResult
 const { LatestRequestGuard } = await import('../src/data/contractDataSource')
 const { dataService } = await import('../src/data/dataService')
 const { resolveConfig } = await import('../src/lib/config')
@@ -1338,6 +1358,401 @@ function makeCountingItemDispatch() {
   check('local 模式 → localRun 1 次', env.calls.localRun === 1)
   check('local 模式 → getRdb/cloudRun/from 0 次', env.calls.getRdb === 0 && env.calls.cloudRun === 0 && env.calls.from === 0)
   check('local 模式 → 透传 localRun 结果', res.ok === true)
+}
+
+// ===========================================================================
+// 23. 门店写操作（cloudStoreMutations + dispatchMasterStoreMutation + local 转换/回归）
+// ===========================================================================
+type StoreMutationOutcome =
+  | { kind: 'resolve'; value: { data: unknown; error: unknown } }
+  | { kind: 'reject' }
+interface StoreMutationRecord {
+  table: string | null
+  insertPayload: Record<string, unknown> | null
+  updatePayload: Record<string, unknown> | null
+  deleted: boolean
+  eqColumn: string | null
+  eqValue: unknown
+  selectColumns: string | null
+}
+function emptyStoreRecord(): StoreMutationRecord {
+  return {
+    table: null,
+    insertPayload: null,
+    updatePayload: null,
+    deleted: false,
+    eqColumn: null,
+    eqValue: null,
+    selectColumns: null,
+  }
+}
+function makeFakeStoreRdb(
+  outcome: StoreMutationOutcome,
+  record: StoreMutationRecord,
+): StoreRdbMutationClient {
+  function makeBuilder(): StoreMutationBuilder {
+    const builder = {} as StoreMutationBuilder
+    builder.eq = (column: string, value: unknown) => {
+      record.eqColumn = column
+      record.eqValue = value
+      return builder
+    }
+    builder.select = (columns: string) => {
+      record.selectColumns = columns
+      return builder
+    }
+    builder.then = (onFulfilled?: (v: { data: unknown; error: unknown }) => unknown, onRejected?: (r: unknown) => unknown) => {
+      if (outcome.kind === 'reject') {
+        return Promise.reject(new Error('sdk-network-internal')).then(onFulfilled, onRejected)
+      }
+      return Promise.resolve(outcome.value).then(onFulfilled, onRejected)
+    }
+    return builder
+  }
+  return {
+    from(table: string) {
+      record.table = table
+      return {
+        insert(values: Record<string, unknown>) {
+          record.insertPayload = values
+          record.updatePayload = null
+          record.deleted = false
+          return makeBuilder()
+        },
+        update(values: Record<string, unknown>) {
+          record.updatePayload = values
+          record.insertPayload = null
+          record.deleted = false
+          return makeBuilder()
+        },
+        delete() {
+          record.deleted = true
+          record.insertPayload = null
+          record.updatePayload = null
+          return makeBuilder()
+        },
+      }
+    },
+  }
+}
+
+const validStoreCloudInput: StoreCloudInput = {
+  store_name: '云顶测试店',
+  address: '测试地址 1 号',
+  phone: '0755-12345678',
+}
+const storeOkOutcome: StoreMutationOutcome = {
+  kind: 'resolve',
+  value: { data: [validStore1], error: null },
+}
+const fakeCreatedStore: StoreView = {
+  store_id: 1,
+  store_name: '云顶东门店',
+  address: '云顶滑雪度假区东入口 1 号',
+  phone: '0755-81000001',
+}
+
+// 23a. payload 精确字段 + 无越权字段 + 空串归一化
+const storePayload = buildStorePayload({ store_name: ' 云顶测试店 ', address: '', phone: '   ' })
+check('store payload 仅 3 字段', Object.keys(storePayload).length === 3)
+check('store payload 无 store_id/role/uid/account_id/actorRole', !('store_id' in storePayload) && !('role' in storePayload) && !('uid' in storePayload) && !('account_id' in storePayload) && !('actorRole' in storePayload))
+check('store payload store_name trim', storePayload.store_name === '云顶测试店')
+check('store payload address 空串 → null', storePayload.address === null)
+check('store payload phone 空白 → null', storePayload.phone === null)
+
+// 23b. validateStoreFields：空白 / 超长 / 非法运行时类型
+check('store_name 空白拒绝', validateStoreFields({ store_name: '   ', address: null, phone: null }).field === 'store_name')
+check('store_name 超长(51)拒绝', validateStoreFields({ store_name: 'x'.repeat(51), address: null, phone: null }).field === 'store_name')
+check('store_name 非 string 拒绝', validateStoreFields({ store_name: 123 as unknown as string, address: null, phone: null }).field === 'store_name')
+check('store_name=50 边界通过', validateStoreFields({ store_name: 'x'.repeat(50), address: null, phone: null }).ok === true)
+check('address 超长(201)拒绝', validateStoreFields({ store_name: 'a', address: 'x'.repeat(201), phone: null }).field === 'address')
+check('address 非 string 拒绝', validateStoreFields({ store_name: 'a', address: 123 as unknown as string, phone: null }).field === 'address')
+check('phone 超长(21)拒绝', validateStoreFields({ store_name: 'a', address: null, phone: 'x'.repeat(21) }).field === 'phone')
+check('phone 非 string 拒绝', validateStoreFields({ store_name: 'a', address: null, phone: {} as unknown as string }).field === 'phone')
+check('合法门店输入通过', validateStoreFields(validStoreCloudInput).ok === true)
+
+// 23c. createStore 精确调用链（from stores + insert + select，无 eq）
+const recCreateStore: StoreMutationRecord = emptyStoreRecord()
+const createStoreRes = await createStore(makeFakeStoreRdb(storeOkOutcome, recCreateStore), validStoreCloudInput)
+check('createStore 成功返回 ok', createStoreRes.ok === true)
+check('createStore 用 stores 表', recCreateStore.table === 'stores')
+check('createStore 走 insert（非 update/delete）', recCreateStore.insertPayload !== null && recCreateStore.updatePayload === null && recCreateStore.deleted === false)
+check('createStore 不设 eq', recCreateStore.eqColumn === null)
+check('createStore select 精确列（非 *）', recCreateStore.selectColumns === STORE_SELECT_COLUMNS && !recCreateStore.selectColumns!.includes('*'))
+
+// 23d. updateStore 精确调用链（update + eq(store_id) + select）
+const recUpdateStore: StoreMutationRecord = emptyStoreRecord()
+const updateStoreRes = await updateStore(makeFakeStoreRdb(storeOkOutcome, recUpdateStore), 1, validStoreCloudInput)
+check('updateStore 成功返回 ok', updateStoreRes.ok === true)
+check('updateStore 用 stores 表', recUpdateStore.table === 'stores')
+check('updateStore 走 update（非 insert/delete）', recUpdateStore.updatePayload !== null && recUpdateStore.insertPayload === null && recUpdateStore.deleted === false)
+check('updateStore eq store_id=1', recUpdateStore.eqColumn === 'store_id' && recUpdateStore.eqValue === 1)
+check('updateStore select 精确列', recUpdateStore.selectColumns === STORE_SELECT_COLUMNS)
+
+// 23e. removeStore 精确调用链（delete + eq(store_id) + select）
+const recRemoveStore: StoreMutationRecord = emptyStoreRecord()
+const removeStoreRes = await removeStore(makeFakeStoreRdb(storeOkOutcome, recRemoveStore), 1)
+check('removeStore 成功返回 ok', removeStoreRes.ok === true)
+check('removeStore 用 stores 表', recRemoveStore.table === 'stores')
+check('removeStore 走 delete', recRemoveStore.deleted === true && recRemoveStore.insertPayload === null && recRemoveStore.updatePayload === null)
+check('removeStore eq store_id=1', recRemoveStore.eqColumn === 'store_id' && recRemoveStore.eqValue === 1)
+
+// 23f. 非法 store_id 拒绝（正安全整数校验，RDB 不触碰）
+const recBadStoreId: StoreMutationRecord = emptyStoreRecord()
+const updBadId = await updateStore(makeFakeStoreRdb(storeOkOutcome, recBadStoreId), 0, validStoreCloudInput)
+check('updateStore id=0 拒绝且不调 RDB', updBadId.ok === false && recBadStoreId.table === null)
+const recNegStoreId: StoreMutationRecord = emptyStoreRecord()
+const rmNegId = await removeStore(makeFakeStoreRdb(storeOkOutcome, recNegStoreId), -1)
+check('removeStore id=-1 拒绝且不调 RDB', rmNegId.ok === false && recNegStoreId.table === null)
+
+// 23g. 0 行 / 多行语义（fail-closed）
+const storeZeroOutcome: StoreMutationOutcome = { kind: 'resolve', value: { data: [], error: null } }
+const updZero = await updateStore(makeFakeStoreRdb(storeZeroOutcome, emptyStoreRecord()), 1, validStoreCloudInput)
+check('updateStore 0 行 → 门店不存在或无权限', updZero.ok === false && updZero.error === STORE_UPDATE_NOT_FOUND_ERROR)
+const rmZero = await removeStore(makeFakeStoreRdb(storeZeroOutcome, emptyStoreRecord()), 1)
+check('removeStore 0 行 → 门店不存在或无权限', rmZero.ok === false && rmZero.error === STORE_DELETE_NOT_FOUND_ERROR)
+const storeMultiOutcome: StoreMutationOutcome = { kind: 'resolve', value: { data: [validStore1, validStore2], error: null } }
+const updMulti = await updateStore(makeFakeStoreRdb(storeMultiOutcome, emptyStoreRecord()), 1, validStoreCloudInput)
+check('updateStore 多行 → fail-closed', updMulti.ok === false && updMulti.error === SAFE_STORE_WRITE_ERROR)
+
+// 23h. 错误映射：23503/23514/42501/未知 + 23505 不虚构「名称重复」
+const fkOutcome: StoreMutationOutcome = { kind: 'resolve', value: { data: null, error: { code: '23503', message: 'fk' } } }
+const rmFk = await removeStore(makeFakeStoreRdb(fkOutcome, emptyStoreRecord()), 1)
+check('removeStore 23503 → 被引用无法删除', rmFk.ok === false && rmFk.error === STORE_REFERENCED_ERROR)
+const checkOutcome: StoreMutationOutcome = { kind: 'resolve', value: { data: null, error: { code: '23514', message: 'check' } } }
+const createStoreCheck = await createStore(makeFakeStoreRdb(checkOutcome, emptyStoreRecord()), validStoreCloudInput)
+check('createStore 23514 → 门店信息不合规', createStoreCheck.ok === false && createStoreCheck.error === STORE_CHECK_VIOLATION_ERROR)
+const permOutcome: StoreMutationOutcome = { kind: 'resolve', value: { data: null, error: { code: '42501', message: 'perm' } } }
+const createPerm = await createStore(makeFakeStoreRdb(permOutcome, emptyStoreRecord()), validStoreCloudInput)
+check('createStore 42501 → 无权限', createPerm.ok === false && createPerm.error === STORE_PERMISSION_ERROR)
+const uniqueOutcome: StoreMutationOutcome = { kind: 'resolve', value: { data: null, error: { code: '23505', message: 'unique' } } }
+const createUnique = await createStore(makeFakeStoreRdb(uniqueOutcome, emptyStoreRecord()), validStoreCloudInput)
+check('store 无 UNIQUE 约束：23505 不映射「名称重复」→ 通用错误', createUnique.ok === false && createUnique.error === SAFE_STORE_WRITE_ERROR)
+const unknownOutcome: StoreMutationOutcome = { kind: 'resolve', value: { data: null, error: { code: '99999', message: 'x' } } }
+const createUnknown = await createStore(makeFakeStoreRdb(unknownOutcome, emptyStoreRecord()), validStoreCloudInput)
+check('未知错误 → 通用安全错误', createUnknown.ok === false && createUnknown.error === SAFE_STORE_WRITE_ERROR)
+
+// 23i. SDK reject / SDK error 收口（不回退本地）
+const recRejectStore: StoreMutationRecord = emptyStoreRecord()
+const rejectStoreRes = await createStore(makeFakeStoreRdb({ kind: 'reject' }, recRejectStore), validStoreCloudInput)
+check('SDK reject → 通用错误', rejectStoreRes.ok === false && rejectStoreRes.error === SAFE_STORE_WRITE_ERROR)
+
+// 23j. dispatchMasterStoreMutation：无效输入全 0 次 / 有效输入各 1 次 / local 只 DataService
+function makeCountingStoreDispatch() {
+  const calls = { getRdb: 0, cloudRun: 0, localRun: 0, from: 0 }
+  const getRdbFn = (): StoreRdbMutationClient => {
+    calls.getRdb++
+    const inner = makeFakeStoreRdb(storeOkOutcome, emptyStoreRecord())
+    return {
+      from(table: string) {
+        calls.from++
+        return inner.from(table)
+      },
+    }
+  }
+  const localRun = () => {
+    calls.localRun++
+    return { ok: true as const, data: fakeCreatedStore }
+  }
+  return { calls, getRdbFn, localRun }
+}
+{
+  const env = makeCountingStoreDispatch()
+  const res = await dispatchMasterStoreMutation(
+    'cloud', validStoreCloudInput, undefined,
+    env.getRdbFn,
+    async (rdb) => { env.calls.cloudRun++; return createStore(rdb, validStoreCloudInput) },
+    env.localRun,
+  )
+  check('cloud createStore 有效输入 → ok', res.ok === true)
+  check('cloud createStore 有效输入 → getRdb 1 次', env.calls.getRdb === 1)
+  check('cloud createStore 有效输入 → cloudRun 1 次', env.calls.cloudRun === 1)
+  check('cloud createStore 有效输入 → localRun 0 次', env.calls.localRun === 0)
+  check('cloud createStore 有效输入 → rdb.from 1 次', env.calls.from === 1)
+}
+{
+  const env = makeCountingStoreDispatch()
+  const bad: StoreCloudInput = { store_name: '', address: null, phone: null }
+  const res = await dispatchMasterStoreMutation(
+    'cloud', bad, undefined,
+    env.getRdbFn,
+    async (rdb) => { env.calls.cloudRun++; return createStore(rdb, bad) },
+    env.localRun,
+  )
+  check('cloud createStore 空 store_name → field store_name', res.ok === false && res.field === 'store_name')
+  check('cloud createStore 空 store_name → getRdb/cloudRun/localRun/from 全 0 次', env.calls.getRdb === 0 && env.calls.cloudRun === 0 && env.calls.localRun === 0 && env.calls.from === 0)
+}
+{
+  const env = makeCountingStoreDispatch()
+  const res = await dispatchMasterStoreMutation(
+    'local', validStoreCloudInput, undefined,
+    env.getRdbFn,
+    async (rdb) => { env.calls.cloudRun++; return createStore(rdb, validStoreCloudInput) },
+    env.localRun,
+  )
+  check('local 模式 → localRun 1 次', env.calls.localRun === 1)
+  check('local 模式 → getRdb/cloudRun/from 0 次', env.calls.getRdb === 0 && env.calls.cloudRun === 0 && env.calls.from === 0)
+  check('local 模式 → 透传 localRun 结果', res.ok === true)
+}
+
+// 23k. toLocalStoreInput：cloud 可空 → local 非空（address/phone null → ''）
+const localStoreConverted = toLocalStoreInput({ store_name: '云顶', address: null, phone: null })
+check('toLocalStoreInput store_name 透传', localStoreConverted.store_name === '云顶')
+check('toLocalStoreInput address null → ""', localStoreConverted.address === '')
+check('toLocalStoreInput phone null → ""', localStoreConverted.phone === '')
+
+// 23l. local DataService 门店 CRUD 不回归
+const localStoreCountBefore = dataService.listStores().length
+const localCreatedStore = dataService.createStore('admin', { store_name: '回归测试店', address: '', phone: '' })
+check('local createStore 成功', localCreatedStore.ok === true)
+if (localCreatedStore.ok) {
+  const sid = localCreatedStore.data.store_id
+  check('local createStore 行数 +1', dataService.listStores().length === localStoreCountBefore + 1)
+  const localUpdStore = dataService.updateStore('admin', sid, { store_name: '回归测试店2', address: 'a', phone: 'b' })
+  check('local updateStore 成功', localUpdStore.ok === true)
+  const localRmStore = dataService.removeStore('admin', sid)
+  check('local removeStore 成功', localRmStore.ok === true)
+  check('local removeStore 行数恢复', dataService.listStores().length === localStoreCountBefore)
+}
+check('local staff createStore 被权限拒绝', dataService.createStore('staff', { store_name: '越权店', address: '', phone: '' }).ok === false)
+
+// 23m. 门店写后重读：复用 CloudMasterRefresh（成功刷新、失败不刷新）
+{
+  const refreshGuard = new LatestRequestGuard()
+  let refetchCalls = 0
+  const refresher = new CloudMasterRefresh(refreshGuard, () => { refetchCalls++ }, () => true)
+  refresher.refreshIfNeeded({ ok: true as const, data: fakeCreatedStore }, true)
+  check('门店写成功后触发重读（refetch 1 次）', refetchCalls === 1)
+  refetchCalls = 0
+  refresher.refreshIfNeeded({ ok: false as const, error: SAFE_STORE_WRITE_ERROR }, true)
+  check('门店写失败不触发重读', refetchCalls === 0)
+}
+
+// ===========================================================================
+// 24. 门店目标 ID 前置分派：非法 store_id 在 getRdb 前拒绝（Hook 分派层 0 次调用证明）
+// ===========================================================================
+function makeCountingStoreIdDispatch() {
+  const calls = { getRdb: 0, cloudRun: 0, localRun: 0, from: 0 }
+  const getRdbFn = (): StoreRdbMutationClient => {
+    calls.getRdb++
+    const inner = makeFakeStoreRdb(storeOkOutcome, emptyStoreRecord())
+    return {
+      from(table: string) {
+        calls.from++
+        return inner.from(table)
+      },
+    }
+  }
+  return { calls, getRdbFn }
+}
+
+// 24a. cloud update：非法 store_id（0/负数/小数/NaN/超安全整数）→ 全 0 次调用
+const badStoreIds: Array<[string, number]> = [
+  ['0', 0],
+  ['负数', -1],
+  ['小数', 1.5],
+  ['NaN', Number.NaN],
+  ['超安全整数', Number.MAX_SAFE_INTEGER + 1],
+]
+for (const [label, badId] of badStoreIds) {
+  const env = makeCountingStoreIdDispatch()
+  const res = await dispatchMasterStoreMutation(
+    'cloud', validStoreCloudInput, badId,
+    env.getRdbFn,
+    async (rdb) => { env.calls.cloudRun++; return updateStore(rdb, badId, validStoreCloudInput) },
+    () => { env.calls.localRun++; return { ok: true as const, data: fakeCreatedStore } },
+  )
+  check(
+    `cloud updateStore store_id=${label} → 拒绝且 getRdb/cloudRun/localRun/from 全 0 次`,
+    res.ok === false && env.calls.getRdb === 0 && env.calls.cloudRun === 0 && env.calls.localRun === 0 && env.calls.from === 0,
+  )
+}
+
+// 24b. cloud delete：非法 store_id → 全 0 次调用
+for (const [label, badId] of badStoreIds) {
+  const env = makeCountingStoreIdDispatch()
+  const res = await dispatchMasterStoreIdMutation<OpResult>(
+    'cloud', badId,
+    env.getRdbFn,
+    async (rdb) => { env.calls.cloudRun++; return removeStore(rdb, badId) },
+    () => { env.calls.localRun++; return { ok: true as const, data: undefined } },
+    { ok: false, error: SAFE_STORE_WRITE_ERROR },
+  )
+  check(
+    `cloud removeStore store_id=${label} → 拒绝且 getRdb/cloudRun/localRun/from 全 0 次`,
+    res.ok === false && env.calls.getRdb === 0 && env.calls.cloudRun === 0 && env.calls.localRun === 0 && env.calls.from === 0,
+  )
+}
+
+// 24c. cloud update：有效 store_id → getRdb/cloudRun/from 各 1 次、localRun 0 次
+{
+  const env = makeCountingStoreIdDispatch()
+  const res = await dispatchMasterStoreMutation(
+    'cloud', validStoreCloudInput, 1,
+    env.getRdbFn,
+    async (rdb) => { env.calls.cloudRun++; return updateStore(rdb, 1, validStoreCloudInput) },
+    () => { env.calls.localRun++; return { ok: true as const, data: fakeCreatedStore } },
+  )
+  check('cloud updateStore 有效 id → ok', res.ok === true)
+  check('cloud updateStore 有效 id → getRdb/cloudRun/from 各 1 次、localRun 0 次', env.calls.getRdb === 1 && env.calls.cloudRun === 1 && env.calls.from === 1 && env.calls.localRun === 0)
+}
+
+// 24d. cloud delete：有效 store_id → getRdb/cloudRun/from 各 1 次、localRun 0 次
+{
+  const env = makeCountingStoreIdDispatch()
+  const res = await dispatchMasterStoreIdMutation<OpResult>(
+    'cloud', 1,
+    env.getRdbFn,
+    async (rdb) => { env.calls.cloudRun++; return removeStore(rdb, 1) },
+    () => { env.calls.localRun++; return { ok: true as const, data: undefined } },
+    { ok: false, error: SAFE_STORE_WRITE_ERROR },
+  )
+  check('cloud removeStore 有效 id → ok', res.ok === true)
+  check('cloud removeStore 有效 id → getRdb/cloudRun/from 各 1 次、localRun 0 次', env.calls.getRdb === 1 && env.calls.cloudRun === 1 && env.calls.from === 1 && env.calls.localRun === 0)
+}
+
+// 24e. local update/delete 不调用 getRdb/cloudRun/from（只走 localRun，即使 id 非法）
+{
+  const env = makeCountingStoreIdDispatch()
+  const res = await dispatchMasterStoreMutation(
+    'local', validStoreCloudInput, 0,
+    env.getRdbFn,
+    async (rdb) => { env.calls.cloudRun++; return updateStore(rdb, 0, validStoreCloudInput) },
+    () => { env.calls.localRun++; return { ok: true as const, data: fakeCreatedStore } },
+  )
+  check('local updateStore → localRun 1 次', env.calls.localRun === 1)
+  check('local updateStore → getRdb/cloudRun/from 0 次', env.calls.getRdb === 0 && env.calls.cloudRun === 0 && env.calls.from === 0)
+  check('local updateStore → 透传 localRun 结果', res.ok === true)
+}
+{
+  const env = makeCountingStoreIdDispatch()
+  const res = await dispatchMasterStoreIdMutation<OpResult>(
+    'local', -1,
+    env.getRdbFn,
+    async (rdb) => { env.calls.cloudRun++; return removeStore(rdb, -1) },
+    () => { env.calls.localRun++; return { ok: true as const, data: undefined } },
+    { ok: false, error: SAFE_STORE_WRITE_ERROR },
+  )
+  check('local removeStore → localRun 1 次', env.calls.localRun === 1)
+  check('local removeStore → getRdb/cloudRun/from 0 次', env.calls.getRdb === 0 && env.calls.cloudRun === 0 && env.calls.from === 0)
+  check('local removeStore → 透传 localRun 结果', res.ok === true)
+}
+
+// 24f. ID 校验失败不刷新 + 锁在失败后可再次获取（finally 释放）
+{
+  const refreshGuard = new LatestRequestGuard()
+  let refetchCalls = 0
+  const refresher = new CloudMasterRefresh(refreshGuard, () => { refetchCalls++ }, () => true)
+  refresher.refreshIfNeeded({ ok: false as const, error: SAFE_STORE_WRITE_ERROR }, true)
+  check('门店 ID/字段校验失败后不触发刷新', refetchCalls === 0)
+}
+{
+  const lock = new MutationLock()
+  const acquired = lock.tryAcquire()
+  check('门店 beginMutation 获取锁成功', acquired === true)
+  lock.release() // 模拟 mutation（含 ID 校验失败）完成后 finally 释放
+  check('门店 mutation 失败后锁可再次获取（finally 释放）', lock.tryAcquire() === true)
+  lock.release()
 }
 
 console.log(`\n通过 ${passed} / ${passed + failed}`)

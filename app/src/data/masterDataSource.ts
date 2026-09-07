@@ -7,7 +7,7 @@
  * 可赋值给 StoreView[] / RentalItemView[]（本地恒写非空，仅字段被加宽为可空），故此处统一用
  * 视图模型类型，local 模式 CRUD 行为不受影响。
  */
-import type { OpResult, RentalItemInput, SkillLevel } from './types'
+import type { OpResult, RentalItemInput, SkillLevel, StoreInput } from './types'
 import {
   SAFE_MASTER_ERROR,
   type MasterReadResult,
@@ -20,6 +20,13 @@ import {
   type ItemRdbMutationClient,
   type RentalItemCloudInput,
 } from './cloudItemMutations'
+import {
+  validateStoreFields,
+  isPositiveSafeInt,
+  SAFE_STORE_WRITE_ERROR,
+  type StoreRdbMutationClient,
+  type StoreCloudInput,
+} from './cloudStoreMutations'
 import { safeCloudLoad as genericSafeCloudLoad } from './safeCloudLoad'
 import { LatestRequestGuard } from './contractDataSource'
 
@@ -185,6 +192,77 @@ export async function dispatchMasterItemMutation(
     localRun,
     { ok: false, error: SAFE_ITEM_WRITE_ERROR },
   )
+}
+
+/**
+ * local/cloud 门店输入转换边界：把 cloud 可空输入转换为 local 非空 StoreInput。
+ * local 领域类型对 address / phone 恒写非空（空值用空串表达），与 cloud 的 null 语义
+ * 明确区分，不改变 local CRUD 行为。
+ */
+export function toLocalStoreInput(input: StoreCloudInput): StoreInput {
+  return {
+    store_name: input.store_name,
+    address: input.address ?? '',
+    phone: input.phone ?? '',
+  }
+}
+
+/**
+ * 门店 create/update 写操作分派（在 getRdbFn / cloudRun / rdb.from 之前执行完整前置校验）。
+ * - cloud：先同步执行目标 ID 校验（storeId 提供时，即 update 场景，需为正安全整数），
+ *   再执行 validateStoreFields(input) 字段校验；任一失败立即返回安全/字段级错误
+ *   （getRdbFn / cloudRun 均 0 次调用、rdb.from 0 次、不触碰 RDB、不回退本地）；
+ *   通过后才 getRdb → cloudRun（cloudRun 内 createStore/updateStore 仍会再做一次校验作为纵深防护）。
+ * - storeId 传 undefined 表示 create（无目标 ID，仅字段前置校验）。
+ * - local：不执行 store_id / 字段前置校验（local 输入非空模型，由 dataService 内部校验），
+ *   行为与既有 local 流程完全一致、不回归。
+ * 返回 Promise 永不 reject。
+ */
+export async function dispatchMasterStoreMutation(
+  mode: MasterDataMode,
+  input: StoreCloudInput,
+  storeId: number | undefined,
+  getRdbFn: () => StoreRdbMutationClient,
+  cloudRun: (rdb: StoreRdbMutationClient) => Promise<OpResult<StoreView>>,
+  localRun: () => OpResult<StoreView>,
+): Promise<OpResult<StoreView>> {
+  if (mode === 'cloud') {
+    // 目标 ID 前置校验（update）：非法 store_id 在 getRdb/cloudRun/rdb.from 之前拒绝
+    if (storeId !== undefined && !isPositiveSafeInt(storeId)) {
+      return { ok: false, error: SAFE_STORE_WRITE_ERROR }
+    }
+    const v = validateStoreFields(input)
+    if (!v.ok) return { ok: false, error: v.error, field: v.field }
+  }
+  return dispatchMasterMutation<OpResult<StoreView>>(
+    mode,
+    getRdbFn,
+    cloudRun,
+    localRun,
+    { ok: false, error: SAFE_STORE_WRITE_ERROR },
+  )
+}
+
+/**
+ * 门店 update/delete 的目标 ID 前置分派（在 getRdbFn / cloudRun / rdb.from 之前执行 store_id 正安全整数校验）。
+ * - cloud：先同步执行 isPositiveSafeInt(storeId)，非法立即返回 fallback 安全错误
+ *   （getRdbFn / cloudRun 均 0 次、rdb.from 0 次、不回退本地）；
+ *   通过后才 getRdb → cloudRun（cloudRun 内 updateStore/removeStore 仍会再校验 store_id 作为纵深防护）。
+ * - local：不执行 store_id 校验（local 由 dataService 内部校验），行为与既有 local 流程一致、不回归。
+ * 返回 Promise 永不 reject。
+ */
+export async function dispatchMasterStoreIdMutation<T>(
+  mode: MasterDataMode,
+  storeId: number,
+  getRdbFn: () => StoreRdbMutationClient,
+  cloudRun: (rdb: StoreRdbMutationClient) => Promise<T>,
+  localRun: () => T,
+  fallback: T,
+): Promise<T> {
+  if (mode === 'cloud' && !isPositiveSafeInt(storeId)) {
+    return fallback
+  }
+  return dispatchMasterMutation<T>(mode, getRdbFn, cloudRun, localRun, fallback)
 }
 
 /**

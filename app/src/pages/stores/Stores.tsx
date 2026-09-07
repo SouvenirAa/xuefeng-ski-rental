@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Button,
   Dialog,
@@ -12,11 +12,10 @@ import {
 import { AddIcon, SearchIcon } from 'tdesign-icons-react'
 import { PageHeader } from '../../components/PageHeader'
 import { useAuth } from '../../auth/AuthContext'
-import { dataService } from '../../data/dataService'
 import { isCloudMode } from '../../lib/cloudbase'
 import { useMasterData } from '../../hooks/useMasterData'
-import type { StoreInput } from '../../data/types'
 import type { StoreView } from '../../data/cloudMaster'
+import type { StoreCloudInput } from '../../data/cloudStoreMutations'
 import { usePagination } from '../../hooks/usePagination'
 
 interface FormState {
@@ -27,12 +26,18 @@ interface FormState {
 
 const emptyForm: FormState = { store_name: '', address: '', phone: '' }
 
+/** 列表行（含可空 address/phone）→ 表单：null 回填为空白 */
 function toForm(s: StoreView): FormState {
   return { store_name: s.store_name, address: s.address ?? '', phone: s.phone ?? '' }
 }
 
-function toInput(f: FormState): StoreInput {
-  return { store_name: f.store_name, address: f.address, phone: f.phone }
+/** 表单 → cloud 可空输入：address/phone 空串归一化为 null（不写虚构文本） */
+function toCloudInput(f: FormState): StoreCloudInput {
+  return {
+    store_name: f.store_name,
+    address: f.address.trim() === '' ? null : f.address.trim(),
+    phone: f.phone.trim() === '' ? null : f.phone.trim(),
+  }
 }
 
 const fieldLabel: React.CSSProperties = {
@@ -45,14 +50,35 @@ const fieldLabel: React.CSSProperties = {
 export function Stores() {
   const { role } = useAuth()
   const isCloud = isCloudMode()
-  const { stores: all, items, loading, error, retry } = useMasterData()
+  const {
+    stores: all,
+    items,
+    loading,
+    error,
+    retry,
+    createStore,
+    updateStore,
+    removeStore,
+    storeMutating,
+  } = useMasterData()
+
+  // 门店写权限：仅 admin（cloud/local 统一；staff/contractor 由路由层 /stores 拦截 403）
+  const canWrite = role === 'admin'
 
   const [keyword, setKeyword] = useState('')
   const [dialogVisible, setDialogVisible] = useState(false)
   const [editing, setEditing] = useState<StoreView | null>(null)
   const [form, setForm] = useState<FormState>(emptyForm)
   const [fieldError, setFieldError] = useState<Record<string, string>>({})
-  const [submitting, setSubmitting] = useState(false)
+
+  // 卸载防护：异步保存/删除返回后，组件已卸载则不再写状态 / 触发全局消息
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
 
   const countByStore = (storeId: number) => items.filter((i) => i.current_store_id === storeId).length
 
@@ -70,14 +96,14 @@ export function Stores() {
   }
 
   const openCreate = () => {
-    if (isCloud) return
+    if (!canWrite) return
     setEditing(null)
     resetForm()
     setDialogVisible(true)
   }
 
   const openEdit = (s: StoreView) => {
-    if (isCloud) return
+    if (!canWrite) return
     setEditing(s)
     setForm(toForm(s))
     setFieldError({})
@@ -86,15 +112,24 @@ export function Stores() {
 
   const setField = (key: keyof FormState, value: string) => {
     setForm((prev) => ({ ...prev, [key]: value }))
+    // 字段重新输入时清除该字段错误
+    setFieldError((prev) => {
+      if (!prev[key]) return prev
+      const next = { ...prev }
+      delete next[key]
+      return next
+    })
   }
 
-  const handleSave = () => {
-    if (submitting || !role || isCloud) return
-    setSubmitting(true)
+  const handleSave = async () => {
+    if (storeMutating || !canWrite) return
+    const input = toCloudInput(form)
     const result = editing
-      ? dataService.updateStore(role, editing.store_id, toInput(form))
-      : dataService.createStore(role, toInput(form))
-    setSubmitting(false)
+      ? await updateStore(editing.store_id, input)
+      : await createStore(input)
+
+    // 组件已卸载：不再写状态、不触发全局消息
+    if (!mountedRef.current) return
 
     if (result.ok) {
       MessagePlugin.success(editing ? '门店已更新' : '门店已新增')
@@ -109,9 +144,11 @@ export function Stores() {
     }
   }
 
-  const handleDelete = (s: StoreView) => {
-    if (!role || isCloud) return
-    const result = dataService.removeStore(role, s.store_id)
+  const handleDelete = async (s: StoreView) => {
+    if (!canWrite) return
+    const result = await removeStore(s.store_id)
+    // 组件已卸载：不再触发全局消息
+    if (!mountedRef.current) return
     if (result.ok) {
       MessagePlugin.success('门店已删除')
     } else {
@@ -135,10 +172,10 @@ export function Stores() {
       width: 130,
       fixed: 'right',
       cell: ({ row }) => {
-        if (isCloud) {
+        if (!canWrite) {
           return (
             <span style={{ color: 'var(--snowpeak-text-placeholder)', fontSize: 12 }}>
-              云端写入待迁移
+              仅管理员可操作
             </span>
           )
         }
@@ -168,7 +205,7 @@ export function Stores() {
         title="门店管理"
         subtitle={
           isCloud
-            ? 'CloudBase PostgreSQL · 只读阶段'
+            ? 'CloudBase PostgreSQL · 云端数据'
             : '维护门店基础信息（仅管理员可访问）'
         }
       />
@@ -200,7 +237,7 @@ export function Stores() {
             prefixIcon={<SearchIcon />}
             style={{ width: 280 }}
           />
-          {!isCloud && (
+          {canWrite && (
             <Button theme="primary" icon={<AddIcon />} onClick={openCreate}>
               新增门店
             </Button>
@@ -248,48 +285,50 @@ export function Stores() {
         />
       </div>
 
-      {!isCloud && (
-        <Dialog
-          visible={dialogVisible}
-          header={editing ? '编辑门店' : '新增门店'}
-          width={480}
-          confirmBtn={{ content: '保存', theme: 'primary', loading: submitting }}
-          cancelBtn="取消"
-          onConfirm={handleSave}
-          onClose={() => setDialogVisible(false)}
-        >
-          <div style={{ padding: '8px 0' }}>
-            <div style={{ marginBottom: 16 }}>
-              <label style={fieldLabel}>
-                门店名称 <span style={{ color: 'var(--snowpeak-danger)' }}>*</span>
-              </label>
-              <Input
-                value={form.store_name}
-                onChange={(v) => setField('store_name', String(v))}
-                placeholder="请输入门店名称"
-                status={fieldError.store_name ? 'error' : 'default'}
-                tips={fieldError.store_name}
-              />
-            </div>
-            <div style={{ marginBottom: 16 }}>
-              <label style={fieldLabel}>地址</label>
-              <Input
-                value={form.address}
-                onChange={(v) => setField('address', String(v))}
-                placeholder="请输入地址"
-              />
-            </div>
-            <div style={{ marginBottom: 16 }}>
-              <label style={fieldLabel}>电话</label>
-              <Input
-                value={form.phone}
-                onChange={(v) => setField('phone', String(v))}
-                placeholder="请输入电话"
-              />
-            </div>
+      <Dialog
+        visible={dialogVisible}
+        header={editing ? '编辑门店' : '新增门店'}
+        width={480}
+        confirmBtn={{ content: '保存', theme: 'primary', loading: storeMutating }}
+        cancelBtn="取消"
+        onConfirm={handleSave}
+        onClose={() => setDialogVisible(false)}
+      >
+        <div style={{ padding: '8px 0' }}>
+          <div style={{ marginBottom: 16 }}>
+            <label style={fieldLabel}>
+              门店名称 <span style={{ color: 'var(--snowpeak-danger)' }}>*</span>
+            </label>
+            <Input
+              value={form.store_name}
+              onChange={(v) => setField('store_name', String(v))}
+              placeholder="请输入门店名称"
+              status={fieldError.store_name ? 'error' : 'default'}
+              tips={fieldError.store_name}
+            />
           </div>
-        </Dialog>
-      )}
+          <div style={{ marginBottom: 16 }}>
+            <label style={fieldLabel}>地址</label>
+            <Input
+              value={form.address}
+              onChange={(v) => setField('address', String(v))}
+              placeholder="请输入地址"
+              status={fieldError.address ? 'error' : 'default'}
+              tips={fieldError.address}
+            />
+          </div>
+          <div style={{ marginBottom: 16 }}>
+            <label style={fieldLabel}>电话</label>
+            <Input
+              value={form.phone}
+              onChange={(v) => setField('phone', String(v))}
+              placeholder="请输入电话"
+              status={fieldError.phone ? 'error' : 'default'}
+              tips={fieldError.phone}
+            />
+          </div>
+        </div>
+      </Dialog>
     </div>
   )
 }

@@ -32,6 +32,14 @@ import {
   type RentalItemCloudInput,
   type ItemRdbMutationClient,
 } from '../data/cloudItemMutations'
+import {
+  createStore as cloudCreateStore,
+  updateStore as cloudUpdateStore,
+  removeStore as cloudRemoveStore,
+  SAFE_STORE_WRITE_ERROR,
+  type StoreCloudInput,
+  type StoreRdbMutationClient,
+} from '../data/cloudStoreMutations'
 import { isCloudMode, getRdb } from '../lib/cloudbase'
 import { useAuth } from '../auth/AuthContext'
 import { useDbData, type UseDbDataOptions } from './useDbData'
@@ -39,8 +47,11 @@ import {
   dispatchMasterLoad,
   dispatchMasterMutation,
   dispatchMasterItemMutation,
+  dispatchMasterStoreMutation,
+  dispatchMasterStoreIdMutation,
   settleMasterRead,
   toLocalItemInput,
+  toLocalStoreInput,
   MutationLock,
   CloudMasterRefresh,
 } from '../data/masterDataSource'
@@ -62,6 +73,14 @@ export interface MasterDataResult {
   remove: (itemId: number) => Promise<OpResult>
   /** 是否有写操作进行中（防重复提交 + 按钮 loading） */
   mutating: boolean
+  /** 新增门店（local/cloud 统一 OpResult，输入为 cloud 可空类型） */
+  createStore: (input: StoreCloudInput) => Promise<OpResult<StoreView>>
+  /** 编辑门店（store_id 由页面从已校验的列表行传入） */
+  updateStore: (storeId: number, input: StoreCloudInput) => Promise<OpResult<StoreView>>
+  /** 删除门店 */
+  removeStore: (storeId: number) => Promise<OpResult>
+  /** 门店写操作进行中（与设备 mutation 共享同一互斥锁，等价状态） */
+  storeMutating: boolean
 }
 
 /** 稳定空数组：cloud 模式下 useDbData 的 disabledValue，避免每渲染新建数组 */
@@ -262,6 +281,81 @@ export function useMasterData(): MasterDataResult {
     [isCloud, role, beginMutation, endMutation],
   )
 
+  const createStore = useCallback(
+    async (input: StoreCloudInput): Promise<OpResult<StoreView>> => {
+      if (!beginMutation()) return { ok: false, error: MUTATION_IN_PROGRESS }
+      try {
+        // cloud：dispatchMasterStoreMutation 在 getRdb/cloudRun 之前先执行完整 validateStoreFields，
+        // 校验失败返回字段错误（getRdb/cloudRun/rdb.from 均 0 次，不触发刷新）；local 由 localRun 内部校验。
+        const result = await dispatchMasterStoreMutation(
+          isCloud ? 'cloud' : 'local',
+          input,
+          undefined,
+          () => getRdb() as unknown as StoreRdbMutationClient,
+          (rdb) => cloudCreateStore(rdb, input),
+          () => {
+            if (!role) return { ok: false, error: '无权限执行该操作' } as OpResult<StoreView>
+            const r = dataService.createStore(role, toLocalStoreInput(input))
+            if (!r.ok) return { ok: false, error: r.error, field: r.field }
+            return { ok: true, data: r.data }
+          },
+        )
+        return refreshRef.current!.refreshIfNeeded(result, isCloud)
+      } finally {
+        endMutation()
+      }
+    },
+    [isCloud, role, beginMutation, endMutation],
+  )
+
+  const updateStore = useCallback(
+    async (storeId: number, input: StoreCloudInput): Promise<OpResult<StoreView>> => {
+      if (!beginMutation()) return { ok: false, error: MUTATION_IN_PROGRESS }
+      try {
+        const result = await dispatchMasterStoreMutation(
+          isCloud ? 'cloud' : 'local',
+          input,
+          storeId,
+          () => getRdb() as unknown as StoreRdbMutationClient,
+          (rdb) => cloudUpdateStore(rdb, storeId, input),
+          () => {
+            if (!role) return { ok: false, error: '无权限执行该操作' } as OpResult<StoreView>
+            const r = dataService.updateStore(role, storeId, toLocalStoreInput(input))
+            if (!r.ok) return { ok: false, error: r.error, field: r.field }
+            return { ok: true, data: r.data }
+          },
+        )
+        return refreshRef.current!.refreshIfNeeded(result, isCloud)
+      } finally {
+        endMutation()
+      }
+    },
+    [isCloud, role, beginMutation, endMutation],
+  )
+
+  const removeStore = useCallback(
+    async (storeId: number): Promise<OpResult> => {
+      if (!beginMutation()) return { ok: false, error: MUTATION_IN_PROGRESS }
+      try {
+        const result = await dispatchMasterStoreIdMutation<OpResult>(
+          isCloud ? 'cloud' : 'local',
+          storeId,
+          () => getRdb() as unknown as StoreRdbMutationClient,
+          (rdb) => cloudRemoveStore(rdb, storeId),
+          () => {
+            if (!role) return { ok: false, error: '无权限执行该操作' } as OpResult
+            return dataService.removeStore(role, storeId)
+          },
+          { ok: false, error: SAFE_STORE_WRITE_ERROR },
+        )
+        return refreshRef.current!.refreshIfNeeded(result, isCloud)
+      } finally {
+        endMutation()
+      }
+    },
+    [isCloud, role, beginMutation, endMutation],
+  )
+
   if (isCloud) {
     return {
       stores: cloudStores,
@@ -274,6 +368,10 @@ export function useMasterData(): MasterDataResult {
       update,
       remove,
       mutating,
+      createStore,
+      updateStore,
+      removeStore,
+      storeMutating: mutating,
     }
   }
   return {
@@ -287,5 +385,9 @@ export function useMasterData(): MasterDataResult {
     update,
     remove,
     mutating,
+    createStore,
+    updateStore,
+    removeStore,
+    storeMutating: mutating,
   }
 }
