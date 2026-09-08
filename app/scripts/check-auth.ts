@@ -105,7 +105,7 @@ check('resolveDataMode "CLOUD" → 错误', resolveDataMode('CLOUD').ok === fals
 const localAdmin: Account = {
   account_id: 1,
   username: 'admin',
-  password_placeholder: 'demo123',
+  password_placeholder: 'demo1234',
   role: 'admin',
   employee_id: 1,
   contractor_id: null,
@@ -121,7 +121,7 @@ check('local 映射移除 password_placeholder', !('password_placeholder' in adm
 const localStaff: Account = {
   account_id: 2,
   username: 'staff',
-  password_placeholder: 'demo123',
+  password_placeholder: 'demo1234',
   role: 'staff',
   employee_id: 2,
   contractor_id: null,
@@ -133,7 +133,7 @@ check('local staff 映射 role=staff + employee_id=2', staffSession.role === 'st
 const localContractor: Account = {
   account_id: 3,
   username: 'contractor',
-  password_placeholder: 'demo123',
+  password_placeholder: 'demo1234',
   role: 'contractor',
   employee_id: null,
   contractor_id: 1,

@@ -36,13 +36,16 @@ const mem = new Map<string, string>()
 const {
   mapCloudContractors,
   mapCloudContractorRates,
+  mapCloudRepairOrderRateIds,
   assembleCloudContractors,
   computeCurrentRateView,
   queryContractors,
   queryContractorRates,
+  queryRepairOrderRateIds,
   queryContractorsWithRates,
   CONTRACTOR_SELECT_COLUMNS,
   RATE_SELECT_COLUMNS,
+  REPAIR_ORDER_RATE_ID_SELECT_COLUMNS,
   SAFE_CONTRACTOR_ERROR,
 } = await import('../src/data/cloudContractors')
 type CloudContractorRow = import('../src/data/cloudContractors').CloudContractorRow
@@ -129,6 +132,8 @@ const validShift2: CloudShiftRow = { shift_id: 2, employee_id: 2, store_id: 2, w
 
 const allContractors = [validContractor1, validContractor2, validContractor3]
 const allRates = [validRate1, validRate2, validRate3]
+// 被维修单引用的 rate_id（含重复，验证去重）
+const allRepairOrderRateIds = [{ rate_id: 2 }, { rate_id: 4 }, { rate_id: 6 }, { rate_id: 6 }]
 const allStores = [validStore1, validStore2]
 const allEmployees = [validEmployee1, validEmployee2, validEmployee6]
 const allShifts = [validShift1, validShift2]
@@ -229,16 +234,24 @@ check('同承包商不同日合法', mapCloudContractorRates([validRate1, validR
 check('不同承包商同日合法', mapCloudContractorRates([validRate1, validRate3], contractorIds).ok === true)
 
 // ===========================================================================
-// 3. 两表联立组装（承包商 + 费率）
+// 3. 三表联立组装（承包商 + 费率 + 被引用费率）
 // ===========================================================================
-const asmC = assembleCloudContractors(allContractors, allRates)
-check('承包商两表组装成功', asmC.ok === true && asmC.ok && asmC.contractors.length === 3 && asmC.rates.length === 3)
+const asmC = assembleCloudContractors(allContractors, allRates, allRepairOrderRateIds)
+check('承包商三表组装成功', asmC.ok === true && asmC.ok && asmC.contractors.length === 3 && asmC.rates.length === 3)
+check('组装返回被引用费率集合（去重升序）', asmC.ok === true && asmC.ok && asmC.referencedRateIds.length === 3 && asmC.referencedRateIds[0] === 2 && asmC.referencedRateIds[2] === 6)
 
-const asmCFail = assembleCloudContractors(null, allRates)
+const asmCFail = assembleCloudContractors(null, allRates, allRepairOrderRateIds)
 check('contractors 失败 → 整体失败', asmCFail.ok === false && !('contractors' in asmCFail) && !('rates' in asmCFail))
 check('失败错误为安全错误', asmCFail.ok === false && asmCFail.error === SAFE_CONTRACTOR_ERROR)
-const asmCFail2 = assembleCloudContractors(allContractors, [{ ...validRate1, contractor_id: 99 }])
+const asmCFail2 = assembleCloudContractors(allContractors, [{ ...validRate1, contractor_id: 99 }], allRepairOrderRateIds)
 check('费率引用不存在承包商 → 整体失败', asmCFail2.ok === false && !('rates' in asmCFail2))
+// 被引用费率解析失败 → 整体失败
+const asmCFail3 = assembleCloudContractors(allContractors, allRates, [{ rate_id: 'abc' }])
+check('被引用费率 rate_id 非法 → 整体失败', asmCFail3.ok === false && !('referencedRateIds' in asmCFail3))
+// 被引用费率集合去重 / 空集合合法
+const refDedup = mapCloudRepairOrderRateIds([{ rate_id: 2 }, { rate_id: 2 }, { rate_id: '6' }])
+check('被引用费率集合去重 + 字符串归一化', refDedup.ok === true && refDedup.referencedRateIds.length === 2 && refDedup.referencedRateIds[0] === 2 && refDedup.referencedRateIds[1] === 6)
+check('被引用费率空集合合法', mapCloudRepairOrderRateIds([]).ok === true && mapCloudRepairOrderRateIds([]).referencedRateIds.length === 0)
 
 // ===========================================================================
 // 4. 当前费率：历史边界与未来费率
@@ -469,35 +482,56 @@ function makeFakeMulti(outcomes: Record<string, { data: unknown; error: unknown 
   }
 }
 
-// 承包商两表主查询
+// 承包商三表主查询（contractors + contractor_rates + repair_orders.rate_id）
 const recsC: Rec3[] = []
 const qc = await queryContractorsWithRates(makeFakeMulti(
   {
     contractors: { data: allContractors, error: null },
     contractor_rates: { data: allRates, error: null },
+    repair_orders: { data: allRepairOrderRateIds, error: null },
   },
   recsC,
 ))
-check('queryContractorsWithRates 成功返回两表', qc.ok === true && qc.ok && qc.contractors.length === 3 && qc.rates.length === 3)
-check('queryContractorsWithRates 依次 from contractors/contractor_rates',
-  recsC.length === 2 && recsC[0].table === 'contractors' && recsC[1].table === 'contractor_rates')
+check('queryContractorsWithRates 成功返回三表', qc.ok === true && qc.ok && qc.contractors.length === 3 && qc.rates.length === 3)
+check('queryContractorsWithRates 成功返回被引用费率集合', qc.ok === true && qc.ok && qc.referencedRateIds.length === 3)
+check('queryContractorsWithRates 依次 from contractors/contractor_rates/repair_orders',
+  recsC.length === 3 && recsC[0].table === 'contractors' && recsC[1].table === 'contractor_rates' && recsC[2].table === 'repair_orders')
+
+// 被引用费率查询列精确（仅 rate_id，非 *）
+const recRepairOrderRateId: Rec = { table: null, columns: null, orderColumn: null, orderAscending: null }
+await queryRepairOrderRateIds(makeFake({ data: allRepairOrderRateIds, error: null }, recRepairOrderRateId))
+check('queryRepairOrderRateIds from=repair_orders', recRepairOrderRateId.table === 'repair_orders')
+check('queryRepairOrderRateIds select 精确 1 列（非 *）', recRepairOrderRateId.columns === REPAIR_ORDER_RATE_ID_SELECT_COLUMNS && !recRepairOrderRateId.columns!.includes('*'))
 
 const recsCErr: Rec3[] = []
 const qcErr = await queryContractorsWithRates(makeFakeMulti(
   {
     contractors: { data: allContractors, error: null },
     contractor_rates: { data: null, error: new Error('secret-internal-detail') },
+    repair_orders: { data: allRepairOrderRateIds, error: null },
   },
   recsCErr,
 ))
 check('承包商关联查询失败 → 整体失败', qcErr.ok === false && qcErr.error === SAFE_CONTRACTOR_ERROR)
 check('承包商关联失败 → 不泄露底层细节', qcErr.ok === false && !qcErr.error.includes('secret'))
 
+const recsCErr2: Rec3[] = []
+const qcErr2 = await queryContractorsWithRates(makeFakeMulti(
+  {
+    contractors: { data: allContractors, error: null },
+    contractor_rates: { data: allRates, error: null },
+    repair_orders: { data: null, error: new Error('secret-repair-order-detail') },
+  },
+  recsCErr2,
+))
+check('被引用费率查询失败 → 整体失败', qcErr2.ok === false && qcErr2.error === SAFE_CONTRACTOR_ERROR)
+
 const recsCThrow: Rec3[] = []
 const qcThrow = await queryContractorsWithRates(makeFakeMulti(
   {
     contractors: { data: allContractors, error: null },
     contractor_rates: 'throw',
+    repair_orders: { data: allRepairOrderRateIds, error: null },
   },
   recsCThrow,
 ))
@@ -560,7 +594,7 @@ const contractorSources: ContractorDataSources = {
   },
   cloudReadContractors: () => {
     cloudContractorCalls++
-    return Promise.resolve({ ok: true, contractors: [], rates: [] })
+    return Promise.resolve({ ok: true, contractors: [], rates: [], referencedRateIds: [] })
   },
 }
 const dispCLocal = dispatchContractorLoad('local', contractorSources)
@@ -620,9 +654,10 @@ check('员工 cloud 模式云 reader 一次', cloudWorkforceCalls === 1)
 // ===========================================================================
 const settledCFail = settleContractorRead({ ok: false, error: SAFE_CONTRACTOR_ERROR })
 check('承包商失败落地为安全错误', settledCFail.error === SAFE_CONTRACTOR_ERROR)
-check('承包商失败返回空数据（不回退本地）', settledCFail.data.contractors.length === 0 && settledCFail.data.rates.length === 0)
-const settledCOk = settleContractorRead({ ok: true, contractors: [fakeContractor], rates: [fakeRate] })
+check('承包商失败返回空数据（不回退本地）', settledCFail.data.contractors.length === 0 && settledCFail.data.rates.length === 0 && settledCFail.data.referencedRateIds.length === 0)
+const settledCOk = settleContractorRead({ ok: true, contractors: [fakeContractor], rates: [fakeRate], referencedRateIds: [2, 4, 6] })
 check('承包商成功落地', settledCOk.data.contractors.length === 1 && settledCOk.error === null)
+check('承包商成功落地保留被引用费率集合', settledCOk.data.referencedRateIds.length === 3 && settledCOk.data.referencedRateIds[0] === 2)
 
 const settledWFail = settleWorkforceRead({ ok: false, error: SAFE_WORKFORCE_ERROR })
 check('员工失败落地为安全错误', settledWFail.error === SAFE_WORKFORCE_ERROR)

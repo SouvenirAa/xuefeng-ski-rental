@@ -41,6 +41,8 @@ type CustomerRdbClient = import('../src/data/cloudCustomers').CustomerRdbClient
 const {
   dispatchCustomerLoad,
   dispatchCustomerMutation,
+  dispatchCustomerWriteMutation,
+  dispatchCustomerIdMutation,
   settleCloudRead,
   safeCloudLoad,
   MutationLock,
@@ -59,6 +61,7 @@ const {
   CUSTOMER_REFERENCED_ERROR,
   CUSTOMER_EMAIL_CONFLICT_ERROR,
   CUSTOMER_NOT_FOUND_ERROR,
+  CUSTOMER_PERMISSION_ERROR,
 } = await import('../src/data/cloudCustomerMutations')
 type CustomerRdbMutationClient = import('../src/data/cloudCustomerMutations').CustomerRdbMutationClient
 type CustomerMutationBuilder = import('../src/data/cloudCustomerMutations').CustomerMutationBuilder
@@ -796,6 +799,114 @@ const dispLocalCreate = await dispatchCustomerMutation(
 check('local 写调用 localRun 一次', localCreateCalls === 1)
 check('local 写不调用 getRdb / cloudRun', getRdbCalls === 0 && cloudCreateCalls === 0)
 check('local 写返回 localRun 结果', dispLocalCreate.ok === true)
+
+// ===========================================================================
+// 20b. 角色门禁：cloud 模式无权角色（canWrite=false）在 getRdb/cloudRun/localRun/from 之前拒绝
+//       （客户写允许 admin/staff，contractor 无权；staff 应放行）
+// ===========================================================================
+function makeCountingCustomerDispatch() {
+  const calls = { getRdb: 0, cloudRun: 0, localRun: 0, from: 0 }
+  const getRdbFn = (): CustomerRdbMutationClient => {
+    calls.getRdb++
+    const inner = makeFakeMutationRdb(okOutcome, emptyMutationRecord())
+    return {
+      from(table: string) {
+        calls.from++
+        return inner.from(table)
+      },
+    }
+  }
+  const localRun = () => {
+    calls.localRun++
+    return { ok: true as const, data: fakeLocalCustomer }
+  }
+  return { calls, getRdbFn, localRun }
+}
+
+// 20b-1. contractor 无权：create/update/remove 均返回无权限错误且四者 0 次
+{
+  const env = makeCountingCustomerDispatch()
+  const res = await dispatchCustomerWriteMutation(
+    'cloud', false, testInput, undefined,
+    env.getRdbFn,
+    async (rdb) => { env.calls.cloudRun++; return createCustomer(rdb, testInput) },
+    env.localRun,
+  )
+  check('cloud contractor create → 无权限错误', res.ok === false && res.error === CUSTOMER_PERMISSION_ERROR)
+  check('cloud contractor create → getRdb/cloudRun/localRun/from 全 0 次', env.calls.getRdb === 0 && env.calls.cloudRun === 0 && env.calls.localRun === 0 && env.calls.from === 0)
+}
+{
+  const env = makeCountingCustomerDispatch()
+  const res = await dispatchCustomerWriteMutation(
+    'cloud', false, testInput, 5,
+    env.getRdbFn,
+    async (rdb) => { env.calls.cloudRun++; return updateCustomer(rdb, 5, testInput) },
+    env.localRun,
+  )
+  check('cloud contractor update → 无权限错误', res.ok === false && res.error === CUSTOMER_PERMISSION_ERROR)
+  check('cloud contractor update → getRdb/cloudRun/localRun/from 全 0 次', env.calls.getRdb === 0 && env.calls.cloudRun === 0 && env.calls.localRun === 0 && env.calls.from === 0)
+}
+{
+  const env = makeCountingCustomerDispatch()
+  const res = await dispatchCustomerIdMutation(
+    'cloud', false, 5,
+    env.getRdbFn,
+    async (rdb) => { env.calls.cloudRun++; return removeCustomer(rdb, 5) },
+    env.localRun,
+    { ok: false, error: SAFE_CUSTOMER_WRITE_ERROR },
+  )
+  check('cloud contractor remove → 无权限错误', res.ok === false && res.error === CUSTOMER_PERMISSION_ERROR)
+  check('cloud contractor remove → getRdb/cloudRun/localRun/from 全 0 次', env.calls.getRdb === 0 && env.calls.cloudRun === 0 && env.calls.localRun === 0 && env.calls.from === 0)
+}
+
+// 20b-2. staff 有权（客户写允许 staff）：create 放行，getRdb/cloudRun 各 1 次
+{
+  const env = makeCountingCustomerDispatch()
+  const res = await dispatchCustomerWriteMutation(
+    'cloud', true, testInput, undefined,
+    env.getRdbFn,
+    async (rdb) => { env.calls.cloudRun++; return createCustomer(rdb, testInput) },
+    env.localRun,
+  )
+  check('cloud staff create → ok', res.ok === true)
+  check('cloud staff create → getRdb/cloudRun 各 1 次、localRun/from 符合', env.calls.getRdb === 1 && env.calls.cloudRun === 1 && env.calls.localRun === 0 && env.calls.from === 1)
+}
+
+// 20b-3. update 非法 customer_id（canWrite=true）：getRdb 前拒绝，全 0 次
+{
+  const env = makeCountingCustomerDispatch()
+  const res = await dispatchCustomerWriteMutation(
+    'cloud', true, testInput, 0,
+    env.getRdbFn,
+    async (rdb) => { env.calls.cloudRun++; return updateCustomer(rdb, 0, testInput) },
+    env.localRun,
+  )
+  check('cloud update 非法 id(0) → 拒绝且 getRdb/cloudRun/localRun/from 全 0 次', res.ok === false && env.calls.getRdb === 0 && env.calls.cloudRun === 0 && env.calls.localRun === 0 && env.calls.from === 0)
+}
+{
+  const env = makeCountingCustomerDispatch()
+  const res = await dispatchCustomerIdMutation(
+    'cloud', true, -1,
+    env.getRdbFn,
+    async (rdb) => { env.calls.cloudRun++; return removeCustomer(rdb, -1) },
+    env.localRun,
+    { ok: false, error: SAFE_CUSTOMER_WRITE_ERROR },
+  )
+  check('cloud remove 非法 id(-1) → 拒绝且 getRdb/cloudRun/localRun/from 全 0 次', res.ok === false && env.calls.getRdb === 0 && env.calls.cloudRun === 0 && env.calls.localRun === 0 && env.calls.from === 0)
+}
+
+// 20b-4. local 模式忽略 canWrite（无权也走 localRun，由 dataService 内部收敛权限）
+{
+  const env = makeCountingCustomerDispatch()
+  const res = await dispatchCustomerWriteMutation(
+    'local', false, testInput, undefined,
+    env.getRdbFn,
+    async (rdb) => { env.calls.cloudRun++; return createCustomer(rdb, testInput) },
+    env.localRun,
+  )
+  check('local 模式忽略 canWrite → localRun 1 次', env.calls.localRun === 1)
+  check('local 模式忽略 canWrite → getRdb/cloudRun/from 0 次', env.calls.getRdb === 0 && env.calls.cloudRun === 0 && env.calls.from === 0)
+}
 
 // ===========================================================================
 // 21. 并发：MutationLock 防重复提交 + LatestRequestGuard 旧查询不覆盖新结果

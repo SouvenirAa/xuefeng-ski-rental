@@ -54,6 +54,7 @@ const {
   safeCloudMasterLoad,
   dispatchMasterMutation,
   dispatchMasterItemMutation,
+  dispatchMasterItemIdMutation,
   dispatchMasterStoreMutation,
   dispatchMasterStoreIdMutation,
   toLocalItemInput,
@@ -78,6 +79,7 @@ const {
   ITEM_CHECK_VIOLATION_ERROR,
   ITEM_UPDATE_NOT_FOUND_ERROR,
   ITEM_DELETE_NOT_FOUND_ERROR,
+  ITEM_PERMISSION_ERROR,
 } = await import('../src/data/cloudItemMutations')
 type RentalItemCloudInput = import('../src/data/cloudItemMutations').RentalItemCloudInput
 type ItemRdbMutationClient = import('../src/data/cloudItemMutations').ItemRdbMutationClient
@@ -1245,7 +1247,7 @@ function makeCountingItemDispatch() {
 {
   const env = makeCountingItemDispatch()
   const res = await dispatchMasterItemMutation(
-    'cloud', testItemInput, itemStoreIds, itemLevelIds,
+    'cloud', true, testItemInput, undefined, itemStoreIds, itemLevelIds,
     env.getRdbFn,
     async (rdb) => { env.calls.cloudRun++; return createItem(rdb, testItemInput, itemStoreIds, itemLevelIds) },
     env.localRun,
@@ -1261,7 +1263,7 @@ function makeCountingItemDispatch() {
 {
   const env = makeCountingItemDispatch()
   const res = await dispatchMasterItemMutation(
-    'cloud', testItemInput, itemStoreIds, itemLevelIds,
+    'cloud', true, testItemInput, 5, itemStoreIds, itemLevelIds,
     env.getRdbFn,
     async (rdb) => { env.calls.cloudRun++; return updateItem(rdb, 5, testItemInput, itemStoreIds, itemLevelIds) },
     env.localRun,
@@ -1278,7 +1280,7 @@ function makeCountingItemDispatch() {
   const env = makeCountingItemDispatch()
   const bad = { ...testItemInput, daily_rate: null }
   const res = await dispatchMasterItemMutation(
-    'cloud', bad, itemStoreIds, itemLevelIds,
+    'cloud', true, bad, undefined, itemStoreIds, itemLevelIds,
     env.getRdbFn,
     async (rdb) => { env.calls.cloudRun++; return createItem(rdb, bad, itemStoreIds, itemLevelIds) },
     env.localRun,
@@ -1295,7 +1297,7 @@ function makeCountingItemDispatch() {
   const env = makeCountingItemDispatch()
   const bad = { ...testItemInput, daily_rate: undefined as unknown as number | null }
   const res = await dispatchMasterItemMutation(
-    'cloud', bad, itemStoreIds, itemLevelIds,
+    'cloud', true, bad, undefined, itemStoreIds, itemLevelIds,
     env.getRdbFn,
     async (rdb) => { env.calls.cloudRun++; return createItem(rdb, bad, itemStoreIds, itemLevelIds) },
     env.localRun,
@@ -1309,7 +1311,7 @@ function makeCountingItemDispatch() {
   const env = makeCountingItemDispatch()
   const bad = { ...testItemInput, daily_rate: null }
   const res = await dispatchMasterItemMutation(
-    'cloud', bad, itemStoreIds, itemLevelIds,
+    'cloud', true, bad, 5, itemStoreIds, itemLevelIds,
     env.getRdbFn,
     async (rdb) => { env.calls.cloudRun++; return updateItem(rdb, 5, bad, itemStoreIds, itemLevelIds) },
     env.localRun,
@@ -1323,7 +1325,7 @@ function makeCountingItemDispatch() {
   const env = makeCountingItemDispatch()
   const bad = { ...testItemInput, category: '滑板车' as ItemCategory }
   const res = await dispatchMasterItemMutation(
-    'cloud', bad, itemStoreIds, itemLevelIds,
+    'cloud', true, bad, undefined, itemStoreIds, itemLevelIds,
     env.getRdbFn,
     async (rdb) => { env.calls.cloudRun++; return createItem(rdb, bad, itemStoreIds, itemLevelIds) },
     env.localRun,
@@ -1337,7 +1339,7 @@ function makeCountingItemDispatch() {
   const env = makeCountingItemDispatch()
   const bad = { ...testItemInput, category: '雪圈' as ItemCategory }
   const res = await dispatchMasterItemMutation(
-    'cloud', bad, itemStoreIds, itemLevelIds,
+    'cloud', true, bad, 5, itemStoreIds, itemLevelIds,
     env.getRdbFn,
     async (rdb) => { env.calls.cloudRun++; return updateItem(rdb, 5, bad, itemStoreIds, itemLevelIds) },
     env.localRun,
@@ -1350,7 +1352,7 @@ function makeCountingItemDispatch() {
 {
   const env = makeCountingItemDispatch()
   const res = await dispatchMasterItemMutation(
-    'local', testItemInput, itemStoreIds, itemLevelIds,
+    'local', false, testItemInput, undefined, itemStoreIds, itemLevelIds,
     env.getRdbFn,
     async (rdb) => { env.calls.cloudRun++; return createItem(rdb, testItemInput, itemStoreIds, itemLevelIds) },
     env.localRun,
@@ -1559,7 +1561,7 @@ function makeCountingStoreDispatch() {
 {
   const env = makeCountingStoreDispatch()
   const res = await dispatchMasterStoreMutation(
-    'cloud', validStoreCloudInput, undefined,
+    'cloud', true, validStoreCloudInput, undefined,
     env.getRdbFn,
     async (rdb) => { env.calls.cloudRun++; return createStore(rdb, validStoreCloudInput) },
     env.localRun,
@@ -1574,7 +1576,7 @@ function makeCountingStoreDispatch() {
   const env = makeCountingStoreDispatch()
   const bad: StoreCloudInput = { store_name: '', address: null, phone: null }
   const res = await dispatchMasterStoreMutation(
-    'cloud', bad, undefined,
+    'cloud', true, bad, undefined,
     env.getRdbFn,
     async (rdb) => { env.calls.cloudRun++; return createStore(rdb, bad) },
     env.localRun,
@@ -1585,7 +1587,7 @@ function makeCountingStoreDispatch() {
 {
   const env = makeCountingStoreDispatch()
   const res = await dispatchMasterStoreMutation(
-    'local', validStoreCloudInput, undefined,
+    'local', false, validStoreCloudInput, undefined,
     env.getRdbFn,
     async (rdb) => { env.calls.cloudRun++; return createStore(rdb, validStoreCloudInput) },
     env.localRun,
@@ -1657,7 +1659,7 @@ const badStoreIds: Array<[string, number]> = [
 for (const [label, badId] of badStoreIds) {
   const env = makeCountingStoreIdDispatch()
   const res = await dispatchMasterStoreMutation(
-    'cloud', validStoreCloudInput, badId,
+    'cloud', true, validStoreCloudInput, badId,
     env.getRdbFn,
     async (rdb) => { env.calls.cloudRun++; return updateStore(rdb, badId, validStoreCloudInput) },
     () => { env.calls.localRun++; return { ok: true as const, data: fakeCreatedStore } },
@@ -1671,8 +1673,8 @@ for (const [label, badId] of badStoreIds) {
 // 24b. cloud delete：非法 store_id → 全 0 次调用
 for (const [label, badId] of badStoreIds) {
   const env = makeCountingStoreIdDispatch()
-  const res = await dispatchMasterStoreIdMutation<OpResult>(
-    'cloud', badId,
+  const res = await dispatchMasterStoreIdMutation(
+    'cloud', true, badId,
     env.getRdbFn,
     async (rdb) => { env.calls.cloudRun++; return removeStore(rdb, badId) },
     () => { env.calls.localRun++; return { ok: true as const, data: undefined } },
@@ -1688,7 +1690,7 @@ for (const [label, badId] of badStoreIds) {
 {
   const env = makeCountingStoreIdDispatch()
   const res = await dispatchMasterStoreMutation(
-    'cloud', validStoreCloudInput, 1,
+    'cloud', true, validStoreCloudInput, 1,
     env.getRdbFn,
     async (rdb) => { env.calls.cloudRun++; return updateStore(rdb, 1, validStoreCloudInput) },
     () => { env.calls.localRun++; return { ok: true as const, data: fakeCreatedStore } },
@@ -1700,8 +1702,8 @@ for (const [label, badId] of badStoreIds) {
 // 24d. cloud delete：有效 store_id → getRdb/cloudRun/from 各 1 次、localRun 0 次
 {
   const env = makeCountingStoreIdDispatch()
-  const res = await dispatchMasterStoreIdMutation<OpResult>(
-    'cloud', 1,
+  const res = await dispatchMasterStoreIdMutation(
+    'cloud', true, 1,
     env.getRdbFn,
     async (rdb) => { env.calls.cloudRun++; return removeStore(rdb, 1) },
     () => { env.calls.localRun++; return { ok: true as const, data: undefined } },
@@ -1715,7 +1717,7 @@ for (const [label, badId] of badStoreIds) {
 {
   const env = makeCountingStoreIdDispatch()
   const res = await dispatchMasterStoreMutation(
-    'local', validStoreCloudInput, 0,
+    'local', false, validStoreCloudInput, 0,
     env.getRdbFn,
     async (rdb) => { env.calls.cloudRun++; return updateStore(rdb, 0, validStoreCloudInput) },
     () => { env.calls.localRun++; return { ok: true as const, data: fakeCreatedStore } },
@@ -1726,8 +1728,8 @@ for (const [label, badId] of badStoreIds) {
 }
 {
   const env = makeCountingStoreIdDispatch()
-  const res = await dispatchMasterStoreIdMutation<OpResult>(
-    'local', -1,
+  const res = await dispatchMasterStoreIdMutation(
+    'local', false, -1,
     env.getRdbFn,
     async (rdb) => { env.calls.cloudRun++; return removeStore(rdb, -1) },
     () => { env.calls.localRun++; return { ok: true as const, data: undefined } },
@@ -1753,6 +1755,105 @@ for (const [label, badId] of badStoreIds) {
   lock.release() // 模拟 mutation（含 ID 校验失败）完成后 finally 释放
   check('门店 mutation 失败后锁可再次获取（finally 释放）', lock.tryAcquire() === true)
   lock.release()
+}
+
+// ===========================================================================
+// 24g. 角色门禁：cloud 模式非 admin（canWrite=false）在 getRdb/cloudRun/localRun/from 之前拒绝
+//       （设备 / 门店写仅 admin；staff/contractor 无权）
+// ===========================================================================
+// 24g-1. 设备 create/update/remove：非 admin → 无权限错误且全 0 次
+{
+  const env = makeCountingItemDispatch()
+  const res = await dispatchMasterItemMutation(
+    'cloud', false, testItemInput, undefined, itemStoreIds, itemLevelIds,
+    env.getRdbFn,
+    async (rdb) => { env.calls.cloudRun++; return createItem(rdb, testItemInput, itemStoreIds, itemLevelIds) },
+    env.localRun,
+  )
+  check('cloud staff createItem → 无权限错误', res.ok === false && res.error === ITEM_PERMISSION_ERROR)
+  check('cloud staff createItem → getRdb/cloudRun/localRun/from 全 0 次', env.calls.getRdb === 0 && env.calls.cloudRun === 0 && env.calls.localRun === 0 && env.calls.from === 0)
+}
+{
+  const env = makeCountingItemDispatch()
+  const res = await dispatchMasterItemMutation(
+    'cloud', false, testItemInput, 5, itemStoreIds, itemLevelIds,
+    env.getRdbFn,
+    async (rdb) => { env.calls.cloudRun++; return updateItem(rdb, 5, testItemInput, itemStoreIds, itemLevelIds) },
+    env.localRun,
+  )
+  check('cloud staff updateItem → 无权限错误', res.ok === false && res.error === ITEM_PERMISSION_ERROR)
+  check('cloud staff updateItem → getRdb/cloudRun/localRun/from 全 0 次', env.calls.getRdb === 0 && env.calls.cloudRun === 0 && env.calls.localRun === 0 && env.calls.from === 0)
+}
+{
+  const env = makeCountingItemDispatch()
+  const res = await dispatchMasterItemIdMutation(
+    'cloud', false, 5,
+    env.getRdbFn,
+    async (rdb) => { env.calls.cloudRun++; return removeItem(rdb, 5) },
+    env.localRun,
+    { ok: false, error: SAFE_ITEM_WRITE_ERROR },
+  )
+  check('cloud staff removeItem → 无权限错误', res.ok === false && res.error === ITEM_PERMISSION_ERROR)
+  check('cloud staff removeItem → getRdb/cloudRun/localRun/from 全 0 次', env.calls.getRdb === 0 && env.calls.cloudRun === 0 && env.calls.localRun === 0 && env.calls.from === 0)
+}
+
+// 24g-2. 设备 update 非法 item_id（canWrite=true）：getRdb 前拒绝，全 0 次
+{
+  const env = makeCountingItemDispatch()
+  const res = await dispatchMasterItemMutation(
+    'cloud', true, testItemInput, 0, itemStoreIds, itemLevelIds,
+    env.getRdbFn,
+    async (rdb) => { env.calls.cloudRun++; return updateItem(rdb, 0, testItemInput, itemStoreIds, itemLevelIds) },
+    env.localRun,
+  )
+  check('cloud updateItem 非法 id(0) → 拒绝且全 0 次', res.ok === false && env.calls.getRdb === 0 && env.calls.cloudRun === 0 && env.calls.localRun === 0 && env.calls.from === 0)
+}
+{
+  const env = makeCountingItemDispatch()
+  const res = await dispatchMasterItemIdMutation(
+    'cloud', true, -1,
+    env.getRdbFn,
+    async (rdb) => { env.calls.cloudRun++; return removeItem(rdb, -1) },
+    env.localRun,
+    { ok: false, error: SAFE_ITEM_WRITE_ERROR },
+  )
+  check('cloud removeItem 非法 id(-1) → 拒绝且全 0 次', res.ok === false && env.calls.getRdb === 0 && env.calls.cloudRun === 0 && env.calls.localRun === 0 && env.calls.from === 0)
+}
+
+// 24g-3. 门店 create/update/remove：非 admin → 无权限错误且全 0 次
+{
+  const env = makeCountingStoreDispatch()
+  const res = await dispatchMasterStoreMutation(
+    'cloud', false, validStoreCloudInput, undefined,
+    env.getRdbFn,
+    async (rdb) => { env.calls.cloudRun++; return createStore(rdb, validStoreCloudInput) },
+    env.localRun,
+  )
+  check('cloud staff createStore → 无权限错误', res.ok === false && res.error === STORE_PERMISSION_ERROR)
+  check('cloud staff createStore → getRdb/cloudRun/localRun/from 全 0 次', env.calls.getRdb === 0 && env.calls.cloudRun === 0 && env.calls.localRun === 0 && env.calls.from === 0)
+}
+{
+  const env = makeCountingStoreDispatch()
+  const res = await dispatchMasterStoreMutation(
+    'cloud', false, validStoreCloudInput, 1,
+    env.getRdbFn,
+    async (rdb) => { env.calls.cloudRun++; return updateStore(rdb, 1, validStoreCloudInput) },
+    env.localRun,
+  )
+  check('cloud staff updateStore → 无权限错误', res.ok === false && res.error === STORE_PERMISSION_ERROR)
+  check('cloud staff updateStore → getRdb/cloudRun/localRun/from 全 0 次', env.calls.getRdb === 0 && env.calls.cloudRun === 0 && env.calls.localRun === 0 && env.calls.from === 0)
+}
+{
+  const env = makeCountingStoreDispatch()
+  const res = await dispatchMasterStoreIdMutation(
+    'cloud', false, 1,
+    env.getRdbFn,
+    async (rdb) => { env.calls.cloudRun++; return removeStore(rdb, 1) },
+    env.localRun,
+    { ok: false, error: SAFE_STORE_WRITE_ERROR },
+  )
+  check('cloud staff removeStore → 无权限错误', res.ok === false && res.error === STORE_PERMISSION_ERROR)
+  check('cloud staff removeStore → getRdb/cloudRun/localRun/from 全 0 次', env.calls.getRdb === 0 && env.calls.cloudRun === 0 && env.calls.localRun === 0 && env.calls.from === 0)
 }
 
 console.log(`\n通过 ${passed} / ${passed + failed}`)
