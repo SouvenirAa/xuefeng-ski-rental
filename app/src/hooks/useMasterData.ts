@@ -45,8 +45,8 @@ import { useAuth } from '../auth/AuthContext'
 import { useDbData, type UseDbDataOptions } from './useDbData'
 import {
   dispatchMasterLoad,
-  dispatchMasterMutation,
   dispatchMasterItemMutation,
+  dispatchMasterItemIdMutation,
   dispatchMasterStoreMutation,
   dispatchMasterStoreIdMutation,
   settleMasterRead,
@@ -94,6 +94,10 @@ const MUTATION_IN_PROGRESS = '操作进行中，请勿重复提交'
 export function useMasterData(): MasterDataResult {
   const isCloud = isCloudMode()
   const { role } = useAuth()
+
+  // cloud 写权限门禁：门店 / 设备写操作仅 admin（与 RLS stores_write / rental_items_*、DataService 权限矩阵一致）。
+  // local 模式不使用该门禁（由 dataService.checkWritePermission 内部按角色收敛）。
+  const canWrite = role === 'admin'
 
   // local 订阅（仅 local 模式启用；cloud 模式 enabled=false：不订阅、不执行 read）。
   const storeOptions: UseDbDataOptions<StoreView[]> = isCloud
@@ -203,11 +207,13 @@ export function useMasterData(): MasterDataResult {
     async (input: RentalItemCloudInput): Promise<OpResult<RentalItemView>> => {
       if (!beginMutation()) return { ok: false, error: MUTATION_IN_PROGRESS }
       try {
-        // cloud：dispatchMasterItemMutation 在 getRdb/cloudRun 之前先执行完整 validateItemFields，
+        // cloud：dispatchMasterItemMutation 在 getRdb/cloudRun 之前先执行角色门禁 + 完整 validateItemFields，
         // 校验失败返回字段错误（getRdb/cloudRun/rdb.from 均 0 次，不触发刷新）；local 仍由 localRun 内部校验。
         const result = await dispatchMasterItemMutation(
           isCloud ? 'cloud' : 'local',
+          canWrite,
           input,
+          undefined,
           cloudStoreIds,
           cloudLevelIds,
           () => getRdb() as unknown as ItemRdbMutationClient,
@@ -227,17 +233,19 @@ export function useMasterData(): MasterDataResult {
         endMutation()
       }
     },
-    [isCloud, role, cloudStoreIds, cloudLevelIds, beginMutation, endMutation],
+    [isCloud, role, canWrite, cloudStoreIds, cloudLevelIds, beginMutation, endMutation],
   )
 
   const update = useCallback(
     async (itemId: number, input: RentalItemCloudInput): Promise<OpResult<RentalItemView>> => {
       if (!beginMutation()) return { ok: false, error: MUTATION_IN_PROGRESS }
       try {
-        // cloud：同 create，先完整 validateItemFields 再 getRdb/cloudRun；local 由 localRun 内部校验。
+        // cloud：同 create，先角色门禁 + item_id 校验 + 完整 validateItemFields 再 getRdb/cloudRun；local 由 localRun 内部校验。
         const result = await dispatchMasterItemMutation(
           isCloud ? 'cloud' : 'local',
+          canWrite,
           input,
+          itemId,
           cloudStoreIds,
           cloudLevelIds,
           () => getRdb() as unknown as ItemRdbMutationClient,
@@ -256,15 +264,17 @@ export function useMasterData(): MasterDataResult {
         endMutation()
       }
     },
-    [isCloud, role, cloudStoreIds, cloudLevelIds, beginMutation, endMutation],
+    [isCloud, role, canWrite, cloudStoreIds, cloudLevelIds, beginMutation, endMutation],
   )
 
   const remove = useCallback(
     async (itemId: number): Promise<OpResult> => {
       if (!beginMutation()) return { ok: false, error: MUTATION_IN_PROGRESS }
       try {
-        const result = await dispatchMasterMutation<OpResult>(
+        const result = await dispatchMasterItemIdMutation(
           isCloud ? 'cloud' : 'local',
+          canWrite,
+          itemId,
           () => getRdb() as unknown as ItemRdbMutationClient,
           (rdb) => removeItem(rdb, itemId),
           () => {
@@ -278,17 +288,18 @@ export function useMasterData(): MasterDataResult {
         endMutation()
       }
     },
-    [isCloud, role, beginMutation, endMutation],
+    [isCloud, role, canWrite, beginMutation, endMutation],
   )
 
   const createStore = useCallback(
     async (input: StoreCloudInput): Promise<OpResult<StoreView>> => {
       if (!beginMutation()) return { ok: false, error: MUTATION_IN_PROGRESS }
       try {
-        // cloud：dispatchMasterStoreMutation 在 getRdb/cloudRun 之前先执行完整 validateStoreFields，
+        // cloud：dispatchMasterStoreMutation 在 getRdb/cloudRun 之前先执行角色门禁 + 完整 validateStoreFields，
         // 校验失败返回字段错误（getRdb/cloudRun/rdb.from 均 0 次，不触发刷新）；local 由 localRun 内部校验。
         const result = await dispatchMasterStoreMutation(
           isCloud ? 'cloud' : 'local',
+          canWrite,
           input,
           undefined,
           () => getRdb() as unknown as StoreRdbMutationClient,
@@ -305,7 +316,7 @@ export function useMasterData(): MasterDataResult {
         endMutation()
       }
     },
-    [isCloud, role, beginMutation, endMutation],
+    [isCloud, role, canWrite, beginMutation, endMutation],
   )
 
   const updateStore = useCallback(
@@ -314,6 +325,7 @@ export function useMasterData(): MasterDataResult {
       try {
         const result = await dispatchMasterStoreMutation(
           isCloud ? 'cloud' : 'local',
+          canWrite,
           input,
           storeId,
           () => getRdb() as unknown as StoreRdbMutationClient,
@@ -330,15 +342,16 @@ export function useMasterData(): MasterDataResult {
         endMutation()
       }
     },
-    [isCloud, role, beginMutation, endMutation],
+    [isCloud, role, canWrite, beginMutation, endMutation],
   )
 
   const removeStore = useCallback(
     async (storeId: number): Promise<OpResult> => {
       if (!beginMutation()) return { ok: false, error: MUTATION_IN_PROGRESS }
       try {
-        const result = await dispatchMasterStoreIdMutation<OpResult>(
+        const result = await dispatchMasterStoreIdMutation(
           isCloud ? 'cloud' : 'local',
+          canWrite,
           storeId,
           () => getRdb() as unknown as StoreRdbMutationClient,
           (rdb) => cloudRemoveStore(rdb, storeId),
@@ -353,7 +366,7 @@ export function useMasterData(): MasterDataResult {
         endMutation()
       }
     },
-    [isCloud, role, beginMutation, endMutation],
+    [isCloud, role, canWrite, beginMutation, endMutation],
   )
 
   if (isCloud) {

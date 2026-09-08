@@ -11,6 +11,7 @@ import {
 import { AddIcon, SearchIcon } from 'tdesign-icons-react'
 import { PageHeader } from '../../components/PageHeader'
 import { StatusTag } from '../../components/StatusTag'
+import { useAuth } from '../../auth/AuthContext'
 import type { ContractListRowView } from '../../data/cloudContracts'
 import { formatDate, formatMoney } from '../../utils/format'
 import { usePagination } from '../../hooks/usePagination'
@@ -20,6 +21,9 @@ import { isCloudMode } from '../../lib/cloudbase'
 export function Contracts() {
   const navigate = useNavigate()
   const isCloud = isCloudMode()
+  const { role } = useAuth()
+  // 新建合同写权限：仅 admin/staff（与路由层 /contracts 角色限制、RPC 角色校验一致）
+  const canWrite = role === 'admin' || role === 'staff'
   const [keyword, setKeyword] = useState('')
   const [filterStatus, setFilterStatus] = useState<string>('')
   const [dateRange, setDateRange] = useState<string[]>([])
@@ -93,7 +97,7 @@ export function Contracts() {
     <div>
       <PageHeader
         title="租赁合同"
-        subtitle={isCloud ? 'CloudBase PostgreSQL · 只读阶段' : '查看合同与状态，执行新建、借出、换货与归还'}
+        subtitle={isCloud ? 'CloudBase PostgreSQL' : '查看合同与状态，执行新建、借出、换货与归还'}
       />
 
       <div style={{ background: 'var(--snowpeak-bg-container)', border: '1px solid var(--snowpeak-border)', borderRadius: 8 }}>
@@ -139,7 +143,7 @@ export function Contracts() {
             style={{ width: 260 }}
           />
           <div style={{ flex: 1 }} />
-          {!isCloud && (
+          {canWrite && (
             <Button theme="primary" icon={<AddIcon />} onClick={() => navigate('/contracts/new')}>
               新建合同
             </Button>

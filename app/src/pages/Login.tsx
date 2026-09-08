@@ -13,9 +13,9 @@ interface DemoAccount {
 }
 
 const demoAccounts: DemoAccount[] = [
-  { username: 'admin', password: 'demo123', roleLabel: '管理员' },
-  { username: 'staff', password: 'demo123', roleLabel: '店员' },
-  { username: 'contractor', password: 'demo123', roleLabel: '承包商' },
+  { username: 'admin', password: 'demo1234', roleLabel: '管理员' },
+  { username: 'staff', password: 'demo1234', roleLabel: '店员' },
+  { username: 'contractor', password: 'demo1234', roleLabel: '承包商' },
 ]
 
 const fieldLabelStyle: React.CSSProperties = {
@@ -32,7 +32,7 @@ export function Login() {
   const [password, setPassword] = useState('')
   const [submitting, setSubmitting] = useState(false)
 
-  // cloud 模式隐藏 demo123 快捷填充（真实密码不得写入源码）
+  // cloud 模式隐藏 demo1234 快捷填充（真实密码不得写入源码）
   const showDemo = !isCloudMode()
 
   // 单一数据源：完全由 React state 控制，登录/回车共用此入口

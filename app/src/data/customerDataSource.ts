@@ -2,9 +2,15 @@
  * 客户列表数据源分派（纯逻辑，可注入计数型 fake reader 做 Node 单测）。
  * 与 useCustomers 中 useDbData(enabled:false) 双重隔离，保证「cloud 模式绝不调用本地 reader」。
  */
-import type { Customer, OpResult } from './types'
+import type { Customer, CustomerInput, OpResult } from './types'
 import { SAFE_CLOUD_ERROR, type CloudReadResult } from './cloudCustomers'
-import type { CustomerRdbMutationClient } from './cloudCustomerMutations'
+import {
+  validateCustomerFields,
+  isPositiveSafeInt,
+  SAFE_CUSTOMER_WRITE_ERROR,
+  CUSTOMER_PERMISSION_ERROR,
+  type CustomerRdbMutationClient,
+} from './cloudCustomerMutations'
 import { safeCloudLoad as genericSafeCloudLoad } from './safeCloudLoad'
 import { LatestRequestGuard } from './contractDataSource'
 
@@ -94,6 +100,69 @@ export async function dispatchCustomerMutation<T>(
   } catch {
     return fallback
   }
+}
+
+/**
+ * 客户 create/update 写操作分派（在 getRdbFn / cloudRun / rdb.from 之前执行完整前置校验）。
+ * - cloud：先执行角色门禁（canWrite，非 admin/staff 立即返回无权限错误），再执行目标 ID 校验
+ *   （customerId 提供时，即 update 场景，需为正安全整数），再执行 validateCustomerFields(input)；
+ *   任一失败立即返回安全/字段级错误（getRdbFn / cloudRun / rdb.from 均 0 次调用、不回退本地）；
+ *   通过后才 getRdb → cloudRun（cloudRun 内 createCustomer/updateCustomer 仍会再校验作为纵深防护）。
+ * - customerId 传 undefined 表示 create（无目标 ID，仅字段前置校验）。
+ * - local：不执行 canWrite / customer_id / 字段前置校验（local 输入由 dataService 内部校验，
+ *   localRun 内仍按 role 收敛权限），行为与既有 local 流程完全一致、不回归。
+ * 返回 Promise 永不 reject。
+ */
+export async function dispatchCustomerWriteMutation(
+  mode: CustomerDataMode,
+  canWrite: boolean,
+  input: CustomerInput,
+  customerId: number | undefined,
+  getRdbFn: () => CustomerRdbMutationClient,
+  cloudRun: (rdb: CustomerRdbMutationClient) => Promise<OpResult<Customer>>,
+  localRun: () => OpResult<Customer>,
+): Promise<OpResult<Customer>> {
+  if (mode === 'cloud') {
+    if (!canWrite) {
+      return { ok: false, error: CUSTOMER_PERMISSION_ERROR }
+    }
+    if (customerId !== undefined && !isPositiveSafeInt(customerId)) {
+      return { ok: false, error: SAFE_CUSTOMER_WRITE_ERROR }
+    }
+    const v = validateCustomerFields(input)
+    if (!v.ok) return { ok: false, error: v.error, field: v.field }
+  }
+  return dispatchCustomerMutation<OpResult<Customer>>(
+    mode,
+    getRdbFn,
+    cloudRun,
+    localRun,
+    { ok: false, error: SAFE_CUSTOMER_WRITE_ERROR },
+  )
+}
+
+/**
+ * 客户 delete 的目标 ID 前置分派（在 getRdbFn / cloudRun / rdb.from 之前执行角色门禁与
+ * customer_id 正安全整数校验）。
+ * - cloud：非 admin/staff（canWrite=false）立即返回无权限错误；非法 customer_id 返回 fallback 安全错误
+ *   （两种情形 getRdbFn / cloudRun / rdb.from 全 0 次、不回退本地）；
+ * - local：不执行 canWrite / customer_id 校验（local 由 dataService 内部校验），行为与既有 local 流程一致、不回归。
+ * 返回 Promise 永不 reject。
+ */
+export async function dispatchCustomerIdMutation(
+  mode: CustomerDataMode,
+  canWrite: boolean,
+  customerId: number,
+  getRdbFn: () => CustomerRdbMutationClient,
+  cloudRun: (rdb: CustomerRdbMutationClient) => Promise<OpResult>,
+  localRun: () => OpResult,
+  fallback: OpResult,
+): Promise<OpResult> {
+  if (mode === 'cloud') {
+    if (!canWrite) return { ok: false, error: CUSTOMER_PERMISSION_ERROR }
+    if (!isPositiveSafeInt(customerId)) return fallback
+  }
+  return dispatchCustomerMutation<OpResult>(mode, getRdbFn, cloudRun, localRun, fallback)
 }
 
 /**

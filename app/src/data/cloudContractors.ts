@@ -19,8 +19,9 @@
  *
  * 当前费率：cloud 模式必须从云端费率自行计算（只取 effective_date <= today 的最新一条，
  * 未来费率不得提前生效），见 computeCurrentRateView；绝不调用 dataService.getEffectiveContractorRate。
- * 「是否被维修单引用」在本批数据中无法判断（repair_orders 不查询），cloud 模式不得调用
- * dataService.isContractorRateReferenced，页面隐藏或显示「云端只读」，不展示虚假引用状态。
+ * 「是否被维修单引用」：cloud 模式查询 repair_orders.rate_id 集合（仅 rate_id 一列），
+ * 得出 referencedRateIds 供页面禁用「被引用费率」的编辑/删除，绝不调用
+ * dataService.isContractorRateReferenced。
  */
 import {
   parsePositiveIntId,
@@ -74,7 +75,13 @@ export interface CloudContractorRateRow {
 }
 
 export type ContractorReadResult =
-  | { ok: true; contractors: ContractorView[]; rates: ContractorRateView[] }
+  | {
+      ok: true
+      contractors: ContractorView[]
+      rates: ContractorRateView[]
+      /** 已被维修单引用的费率 rate_id 集合（升序去重），供页面禁用「被引用费率」的编辑/删除 */
+      referencedRateIds: number[]
+    }
   | { ok: false; error: string }
 
 // ---------------------------------------------------------------------------
@@ -122,12 +129,13 @@ function mapContractorRow(
 }
 
 /**
- * 费率单行映射 + 关联完整性校验：contractor_id 必须存在于已读取承包商集合。
- * effective_date 严格日期；hourly_rate 有限正数。
+ * 费率单行映射（不含关联完整性校验）：effective_date 严格日期；hourly_rate 有限正数。
+ * 关联完整性（contractor_id 必须存在）由 mapCloudContractorRates 在批量映射时统一校验，
+ * 写操作返回行落地（settleReturnedRate）也复用本函数——写后返回的 contractor_id 已由数据库
+ * 外键保证真实存在，无需在此二次校验。
  */
-function mapContractorRateRow(
+export function mapContractorRateRow(
   raw: CloudContractorRateRow,
-  contractorIds: ReadonlySet<number>,
 ): { ok: true; rate: ContractorRateView } | { ok: false; error: string } {
   if (typeof raw !== 'object' || raw === null) return { ok: false, error: SAFE_CONTRACTOR_ERROR }
 
@@ -142,9 +150,6 @@ function mapContractorRateRow(
 
   const hourly_rate = parsePositiveNumber(raw.hourly_rate)
   if (hourly_rate === 'INVALID') return { ok: false, error: SAFE_CONTRACTOR_ERROR }
-
-  // 关联完整性：费率必须归属一个真实存在的承包商
-  if (!contractorIds.has(contractor_id)) return { ok: false, error: SAFE_CONTRACTOR_ERROR }
 
   return { ok: true, rate: { rate_id, contractor_id, effective_date, hourly_rate } }
 }
@@ -178,8 +183,10 @@ export function mapCloudContractorRates(
   const seenRate = new Set<number>()
   const seenComposite = new Set<string>() // `${contractor_id}:${effective_date}`
   for (const raw of rows) {
-    const r = mapContractorRateRow(raw as CloudContractorRateRow, contractorIds)
+    const r = mapContractorRateRow(raw as CloudContractorRateRow)
     if (!r.ok) return { ok: false, error: SAFE_CONTRACTOR_ERROR }
+    // 关联完整性：费率必须归属一个真实存在的承包商
+    if (!contractorIds.has(r.rate.contractor_id)) return { ok: false, error: SAFE_CONTRACTOR_ERROR }
     if (seenRate.has(r.rate.rate_id)) return { ok: false, error: SAFE_CONTRACTOR_ERROR }
     // 复合唯一：同承包商同日仅一条费率（UNIQUE(contractor_id, effective_date)）
     const compositeKey = `${r.rate.contractor_id}:${r.rate.effective_date}`
@@ -192,20 +199,53 @@ export function mapCloudContractorRates(
   return { ok: true, rates }
 }
 
+/** 维修单 rate_id 行（仅需 rate_id 一列） */
+export interface CloudRepairOrderRateIdRow {
+  rate_id: number | string | null | undefined
+}
+
 /**
- * 两表联立组装：先映射承包商构建外键集合，再映射费率并做关联校验。
+ * 解析「已被维修单引用的费率 rate_id」集合（升序去重）：
+ * 逐行解析 rate_id 为正安全整数，任一非法即 fail-closed；重复 rate_id 去重。
+ * 空数组（无任何维修单）为合法结果，返回空集合。
+ */
+export function mapCloudRepairOrderRateIds(
+  rows: unknown,
+): { ok: true; referencedRateIds: number[] } | { ok: false; error: string } {
+  if (!Array.isArray(rows)) return { ok: false, error: SAFE_CONTRACTOR_ERROR }
+  const seen = new Set<number>()
+  for (const raw of rows) {
+    if (typeof raw !== 'object' || raw === null) return { ok: false, error: SAFE_CONTRACTOR_ERROR }
+    const rate_id = parsePositiveIntId((raw as CloudRepairOrderRateIdRow).rate_id)
+    if (rate_id === 'INVALID') return { ok: false, error: SAFE_CONTRACTOR_ERROR }
+    seen.add(rate_id)
+  }
+  const referencedRateIds = Array.from(seen).sort((a, b) => a - b)
+  return { ok: true, referencedRateIds }
+}
+
+/**
+ * 三表联立组装：先映射承包商构建外键集合，再映射费率并做关联校验，最后解析被维修单引用的费率集合。
  * 任一环节失败即返回安全错误，绝不返回部分数据。
  */
 export function assembleCloudContractors(
   contractorsRows: unknown,
   ratesRows: unknown,
+  referencedRateIdsRows: unknown,
 ): ContractorReadResult {
   const c = mapCloudContractors(contractorsRows)
   if (!c.ok) return { ok: false, error: SAFE_CONTRACTOR_ERROR }
   const contractorIds = new Set(c.contractors.map((x) => x.contractor_id))
   const r = mapCloudContractorRates(ratesRows, contractorIds)
   if (!r.ok) return { ok: false, error: SAFE_CONTRACTOR_ERROR }
-  return { ok: true, contractors: c.contractors, rates: r.rates }
+  const ref = mapCloudRepairOrderRateIds(referencedRateIdsRows)
+  if (!ref.ok) return { ok: false, error: SAFE_CONTRACTOR_ERROR }
+  return {
+    ok: true,
+    contractors: c.contractors,
+    rates: r.rates,
+    referencedRateIds: ref.referencedRateIds,
+  }
 }
 
 /**
@@ -232,6 +272,8 @@ export function computeCurrentRateView(
 export const CONTRACTOR_SELECT_COLUMNS = 'contractor_id, name, address, phone, email'
 /** 费率精确列（4 列） */
 export const RATE_SELECT_COLUMNS = 'rate_id, contractor_id, effective_date, hourly_rate'
+/** 维修单被引用费率查询精确列（仅 rate_id 1 列） */
+export const REPAIR_ORDER_RATE_ID_SELECT_COLUMNS = 'rate_id'
 
 /** 承包商查询：from('contractors') + 精确列 + contractor_id 升序 */
 export async function queryContractors(
@@ -247,20 +289,31 @@ export async function queryContractorRates(
   return rdb.from('contractor_rates').select(RATE_SELECT_COLUMNS).order('rate_id', { ascending: true })
 }
 
+/** 被引用费率查询：from('repair_orders') + 精确列 rate_id（升序，供去重集合解析） */
+export async function queryRepairOrderRateIds(
+  rdb: MasterRdbClient,
+): Promise<{ data: unknown; error: unknown }> {
+  return rdb
+    .from('repair_orders')
+    .select(REPAIR_ORDER_RATE_ID_SELECT_COLUMNS)
+    .order('rate_id', { ascending: true })
+}
+
 /**
- * 承包商 + 费率主查询：并行读取两表，任一返回 error 或抛异常 → 整体安全错误
+ * 承包商 + 费率 + 被引用费率主查询：并行读取三表，任一返回 error 或抛异常 → 整体安全错误
  * （不返回部分数据）。成功后联立组装并做关联校验。
  */
 export async function queryContractorsWithRates(rdb: MasterRdbClient): Promise<ContractorReadResult> {
   try {
-    const [contractors, rates] = await Promise.all([
+    const [contractors, rates, referencedRateIds] = await Promise.all([
       queryContractors(rdb),
       queryContractorRates(rdb),
+      queryRepairOrderRateIds(rdb),
     ])
-    if (contractors.error || rates.error) {
+    if (contractors.error || rates.error || referencedRateIds.error) {
       return { ok: false, error: SAFE_CONTRACTOR_ERROR }
     }
-    return assembleCloudContractors(contractors.data, rates.data)
+    return assembleCloudContractors(contractors.data, rates.data, referencedRateIds.data)
   } catch {
     return { ok: false, error: SAFE_CONTRACTOR_ERROR }
   }

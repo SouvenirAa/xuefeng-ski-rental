@@ -36,6 +36,9 @@ import {
 /** 设备写操作统一安全错误（不包含底层细节） */
 export const SAFE_ITEM_WRITE_ERROR = '设备操作失败，请稍后重试'
 
+/** 设备无权限（42501 / 前端角色门禁） */
+export const ITEM_PERMISSION_ERROR = '无权限执行该操作'
+
 /** 库存编号唯一冲突（23505；item_code 数据库 UNIQUE 区分大小写） */
 export const ITEM_CODE_CONFLICT_ERROR = '该库存编号已被其他设备使用'
 

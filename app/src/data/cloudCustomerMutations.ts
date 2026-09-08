@@ -20,6 +20,9 @@ import { CUSTOMER_SELECT_COLUMNS, mapCloudCustomers, type CloudCustomerRow } fro
 /** 客户写操作统一安全错误（不包含底层细节） */
 export const SAFE_CUSTOMER_WRITE_ERROR = '客户操作失败，请稍后重试'
 
+/** 客户无权限（42501 / 前端角色门禁） */
+export const CUSTOMER_PERMISSION_ERROR = '无权限执行该操作'
+
 /** 删除被合同引用时的明确业务提示（与 DataService.removeCustomer 文案对齐） */
 export const CUSTOMER_REFERENCED_ERROR = '客户已有租赁合同，无法删除'
 
@@ -162,7 +165,7 @@ function mapMutationError(error: unknown): { ok: false; error: string; field?: s
     return { ok: false, error: CUSTOMER_REFERENCED_ERROR }
   }
   if (code === '42501') {
-    return { ok: false, error: '无权限执行该操作' }
+    return { ok: false, error: CUSTOMER_PERMISSION_ERROR }
   }
   return { ok: false, error: SAFE_CUSTOMER_WRITE_ERROR }
 }

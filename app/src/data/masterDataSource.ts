@@ -17,6 +17,7 @@ import {
 import {
   validateItemFields,
   SAFE_ITEM_WRITE_ERROR,
+  ITEM_PERMISSION_ERROR,
   type ItemRdbMutationClient,
   type RentalItemCloudInput,
 } from './cloudItemMutations'
@@ -24,6 +25,7 @@ import {
   validateStoreFields,
   isPositiveSafeInt,
   SAFE_STORE_WRITE_ERROR,
+  STORE_PERMISSION_ERROR,
   type StoreRdbMutationClient,
   type StoreCloudInput,
 } from './cloudStoreMutations'
@@ -164,17 +166,21 @@ export async function dispatchMasterMutation<T>(
 }
 
 /**
- * 设备 create/update 写操作分派（在 getRdbFn / cloudRun / rdb.from 之前执行完整字段校验）。
- * - cloud：先同步执行 validateItemFields(input, storeIds, levelIds)，校验失败立即返回
- *   字段级错误（getRdbFn / cloudRun 均 0 次调用、rdb.from 0 次、不触碰 RDB、不回退本地）；
+ * 设备 create/update 写操作分派（在 getRdbFn / cloudRun / rdb.from 之前执行完整前置校验）。
+ * - cloud：先执行角色门禁（canWrite，非 admin 立即返回无权限错误），再执行目标 ID 校验
+ *   （itemId 提供时，即 update 场景，需为正安全整数），再执行 validateItemFields(input, storeIds, levelIds)；
+ *   任一失败立即返回安全/字段级错误（getRdbFn / cloudRun / rdb.from 均 0 次调用、不回退本地）；
  *   通过后才 getRdb → cloudRun（cloudRun 内 createItem/updateItem 仍会再做一次校验作为纵深防护）。
- * - local：不执行 validateItemFields（local 输入非空模型，由 localRun 内部经 validateItemBasics
+ * - itemId 传 undefined 表示 create（无目标 ID，仅字段前置校验）。
+ * - local：不执行 canWrite / item_id / 字段前置校验（local 输入非空模型，由 localRun 内部经 validateItemBasics
  *   后转 DataService 校验），行为与既有 local 流程完全一致、不回归。
  * 返回 Promise 永不 reject。
  */
 export async function dispatchMasterItemMutation(
   mode: MasterDataMode,
+  canWrite: boolean,
   input: RentalItemCloudInput,
+  itemId: number | undefined,
   storeIds: ReadonlySet<number>,
   levelIds: ReadonlySet<number>,
   getRdbFn: () => ItemRdbMutationClient,
@@ -182,6 +188,12 @@ export async function dispatchMasterItemMutation(
   localRun: () => OpResult<RentalItemView>,
 ): Promise<OpResult<RentalItemView>> {
   if (mode === 'cloud') {
+    if (!canWrite) {
+      return { ok: false, error: ITEM_PERMISSION_ERROR }
+    }
+    if (itemId !== undefined && !isPositiveSafeInt(itemId)) {
+      return { ok: false, error: SAFE_ITEM_WRITE_ERROR }
+    }
     const v = validateItemFields(input, storeIds, levelIds)
     if (!v.ok) return { ok: false, error: v.error, field: v.field }
   }
@@ -192,6 +204,30 @@ export async function dispatchMasterItemMutation(
     localRun,
     { ok: false, error: SAFE_ITEM_WRITE_ERROR },
   )
+}
+
+/**
+ * 设备 delete 的目标 ID 前置分派（在 getRdbFn / cloudRun / rdb.from 之前执行角色门禁与
+ * item_id 正安全整数校验）。
+ * - cloud：非 admin（canWrite=false）立即返回无权限错误；非法 item_id 返回 fallback 安全错误
+ *   （两种情形 getRdbFn / cloudRun / rdb.from 全 0 次、不回退本地）；
+ * - local：不执行 canWrite / item_id 校验（local 由 dataService 内部校验），行为与既有 local 流程一致、不回归。
+ * 返回 Promise 永不 reject。
+ */
+export async function dispatchMasterItemIdMutation(
+  mode: MasterDataMode,
+  canWrite: boolean,
+  itemId: number,
+  getRdbFn: () => ItemRdbMutationClient,
+  cloudRun: (rdb: ItemRdbMutationClient) => Promise<OpResult>,
+  localRun: () => OpResult,
+  fallback: OpResult,
+): Promise<OpResult> {
+  if (mode === 'cloud') {
+    if (!canWrite) return { ok: false, error: ITEM_PERMISSION_ERROR }
+    if (!isPositiveSafeInt(itemId)) return fallback
+  }
+  return dispatchMasterMutation<OpResult>(mode, getRdbFn, cloudRun, localRun, fallback)
 }
 
 /**
@@ -209,17 +245,18 @@ export function toLocalStoreInput(input: StoreCloudInput): StoreInput {
 
 /**
  * 门店 create/update 写操作分派（在 getRdbFn / cloudRun / rdb.from 之前执行完整前置校验）。
- * - cloud：先同步执行目标 ID 校验（storeId 提供时，即 update 场景，需为正安全整数），
- *   再执行 validateStoreFields(input) 字段校验；任一失败立即返回安全/字段级错误
- *   （getRdbFn / cloudRun 均 0 次调用、rdb.from 0 次、不触碰 RDB、不回退本地）；
+ * - cloud：先执行角色门禁（canWrite，非 admin 立即返回无权限错误），再执行目标 ID 校验
+ *   （storeId 提供时，即 update 场景，需为正安全整数），再执行 validateStoreFields(input) 字段校验；
+ *   任一失败立即返回安全/字段级错误（getRdbFn / cloudRun / rdb.from 均 0 次调用、不回退本地）；
  *   通过后才 getRdb → cloudRun（cloudRun 内 createStore/updateStore 仍会再做一次校验作为纵深防护）。
  * - storeId 传 undefined 表示 create（无目标 ID，仅字段前置校验）。
- * - local：不执行 store_id / 字段前置校验（local 输入非空模型，由 dataService 内部校验），
+ * - local：不执行 canWrite / store_id / 字段前置校验（local 输入非空模型，由 dataService 内部校验），
  *   行为与既有 local 流程完全一致、不回归。
  * 返回 Promise 永不 reject。
  */
 export async function dispatchMasterStoreMutation(
   mode: MasterDataMode,
+  canWrite: boolean,
   input: StoreCloudInput,
   storeId: number | undefined,
   getRdbFn: () => StoreRdbMutationClient,
@@ -227,6 +264,9 @@ export async function dispatchMasterStoreMutation(
   localRun: () => OpResult<StoreView>,
 ): Promise<OpResult<StoreView>> {
   if (mode === 'cloud') {
+    if (!canWrite) {
+      return { ok: false, error: STORE_PERMISSION_ERROR }
+    }
     // 目标 ID 前置校验（update）：非法 store_id 在 getRdb/cloudRun/rdb.from 之前拒绝
     if (storeId !== undefined && !isPositiveSafeInt(storeId)) {
       return { ok: false, error: SAFE_STORE_WRITE_ERROR }
@@ -244,25 +284,28 @@ export async function dispatchMasterStoreMutation(
 }
 
 /**
- * 门店 update/delete 的目标 ID 前置分派（在 getRdbFn / cloudRun / rdb.from 之前执行 store_id 正安全整数校验）。
- * - cloud：先同步执行 isPositiveSafeInt(storeId)，非法立即返回 fallback 安全错误
- *   （getRdbFn / cloudRun 均 0 次、rdb.from 0 次、不回退本地）；
- *   通过后才 getRdb → cloudRun（cloudRun 内 updateStore/removeStore 仍会再校验 store_id 作为纵深防护）。
- * - local：不执行 store_id 校验（local 由 dataService 内部校验），行为与既有 local 流程一致、不回归。
+ * 门店 delete 的目标 ID 前置分派（在 getRdbFn / cloudRun / rdb.from 之前执行角色门禁与
+ * store_id 正安全整数校验）。
+ * - cloud：非 admin（canWrite=false）立即返回无权限错误；非法 store_id 返回 fallback 安全错误
+ *   （两种情形 getRdbFn / cloudRun / rdb.from 全 0 次、不回退本地）；
+ *   通过后才 getRdb → cloudRun（cloudRun 内 removeStore 仍会再校验 store_id 作为纵深防护）。
+ * - local：不执行 canWrite / store_id 校验（local 由 dataService 内部校验），行为与既有 local 流程一致、不回归。
  * 返回 Promise 永不 reject。
  */
-export async function dispatchMasterStoreIdMutation<T>(
+export async function dispatchMasterStoreIdMutation(
   mode: MasterDataMode,
+  canWrite: boolean,
   storeId: number,
   getRdbFn: () => StoreRdbMutationClient,
-  cloudRun: (rdb: StoreRdbMutationClient) => Promise<T>,
-  localRun: () => T,
-  fallback: T,
-): Promise<T> {
-  if (mode === 'cloud' && !isPositiveSafeInt(storeId)) {
-    return fallback
+  cloudRun: (rdb: StoreRdbMutationClient) => Promise<OpResult>,
+  localRun: () => OpResult,
+  fallback: OpResult,
+): Promise<OpResult> {
+  if (mode === 'cloud') {
+    if (!canWrite) return { ok: false, error: STORE_PERMISSION_ERROR }
+    if (!isPositiveSafeInt(storeId)) return fallback
   }
-  return dispatchMasterMutation<T>(mode, getRdbFn, cloudRun, localRun, fallback)
+  return dispatchMasterMutation<OpResult>(mode, getRdbFn, cloudRun, localRun, fallback)
 }
 
 /**

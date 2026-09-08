@@ -28,7 +28,8 @@ import { useAuth } from '../auth/AuthContext'
 import { useDbData, type UseDbDataOptions } from './useDbData'
 import {
   dispatchCustomerLoad,
-  dispatchCustomerMutation,
+  dispatchCustomerWriteMutation,
+  dispatchCustomerIdMutation,
   settleCloudRead,
   MutationLock,
   CloudCustomerRefresh,
@@ -60,6 +61,10 @@ const MUTATION_IN_PROGRESS = '操作进行中，请勿重复提交'
 export function useCustomers(): CustomersResult {
   const isCloud = isCloudMode()
   const { role } = useAuth()
+
+  // cloud 写权限门禁：客户写操作允许 admin / staff（与 RLS customers_write、DataService 权限矩阵一致）。
+  // local 模式不使用该门禁（由 dataService.checkWritePermission 内部按角色收敛）。
+  const canWrite = role === 'admin' || role === 'staff'
 
   // local 订阅（仅 local 模式启用；cloud 模式 enabled=false：不订阅、不执行 read）。
   const dbOptions: UseDbDataOptions<Customer[]> = isCloud
@@ -148,15 +153,17 @@ export function useCustomers(): CustomersResult {
     async (input: CustomerInput): Promise<OpResult<Customer>> => {
       if (!beginMutation()) return { ok: false, error: MUTATION_IN_PROGRESS }
       try {
-        const result = await dispatchCustomerMutation<OpResult<Customer>>(
+        const result = await dispatchCustomerWriteMutation(
           isCloud ? 'cloud' : 'local',
+          canWrite,
+          input,
+          undefined,
           () => getRdb() as unknown as CustomerRdbMutationClient,
           (rdb) => createCustomer(rdb, input),
           () => {
             if (!role) return { ok: false, error: '无权限执行该操作' } as OpResult<Customer>
             return dataService.createCustomer(role, input)
           },
-          { ok: false, error: SAFE_CUSTOMER_WRITE_ERROR },
         )
         // 成功（仅 cloud）→ 立即失效旧读 token 并触发重读；失败不刷新、不回退本地
         return refreshRef.current!.refreshIfNeeded(result, isCloud)
@@ -164,37 +171,41 @@ export function useCustomers(): CustomersResult {
         endMutation()
       }
     },
-    [isCloud, role, beginMutation, endMutation],
+    [isCloud, role, canWrite, beginMutation, endMutation],
   )
 
   const update = useCallback(
     async (customerId: number, input: CustomerInput): Promise<OpResult<Customer>> => {
       if (!beginMutation()) return { ok: false, error: MUTATION_IN_PROGRESS }
       try {
-        const result = await dispatchCustomerMutation<OpResult<Customer>>(
+        const result = await dispatchCustomerWriteMutation(
           isCloud ? 'cloud' : 'local',
+          canWrite,
+          input,
+          customerId,
           () => getRdb() as unknown as CustomerRdbMutationClient,
           (rdb) => updateCustomer(rdb, customerId, input),
           () => {
             if (!role) return { ok: false, error: '无权限执行该操作' } as OpResult<Customer>
             return dataService.updateCustomer(role, customerId, input)
           },
-          { ok: false, error: SAFE_CUSTOMER_WRITE_ERROR },
         )
         return refreshRef.current!.refreshIfNeeded(result, isCloud)
       } finally {
         endMutation()
       }
     },
-    [isCloud, role, beginMutation, endMutation],
+    [isCloud, role, canWrite, beginMutation, endMutation],
   )
 
   const remove = useCallback(
     async (customerId: number): Promise<OpResult> => {
       if (!beginMutation()) return { ok: false, error: MUTATION_IN_PROGRESS }
       try {
-        const result = await dispatchCustomerMutation<OpResult>(
+        const result = await dispatchCustomerIdMutation(
           isCloud ? 'cloud' : 'local',
+          canWrite,
+          customerId,
           () => getRdb() as unknown as CustomerRdbMutationClient,
           (rdb) => removeCustomer(rdb, customerId),
           () => {
@@ -208,7 +219,7 @@ export function useCustomers(): CustomersResult {
         endMutation()
       }
     },
-    [isCloud, role, beginMutation, endMutation],
+    [isCloud, role, canWrite, beginMutation, endMutation],
   )
 
   if (isCloud) {

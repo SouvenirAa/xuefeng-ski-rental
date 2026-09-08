@@ -13,8 +13,19 @@ import {
   type RepairReadResult,
   type RepairRowView,
 } from './cloudRepairs'
-import type { RepairOrder, RentalItem, Contractor, ContractorRate } from './types'
+import {
+  isPositiveSafeInt,
+  validateCreateRepairFields,
+  validateCompleteRepairFields,
+  SAFE_REPAIR_WRITE_ERROR,
+  REPAIR_PERMISSION_ERROR,
+  type RepairCreateCloudInput,
+  type RepairCompleteCloudInput,
+  type RepairMutationRpcClient,
+} from './cloudRepairMutations'
+import type { RepairOrder, RentalItem, Contractor, ContractorRate, OpResult } from './types'
 import { safeCloudLoad } from './safeCloudLoad'
+import { LatestRequestGuard } from './contractDataSource'
 
 export type RepairDataMode = 'local' | 'cloud'
 
@@ -185,4 +196,188 @@ export function filterRepairsByContractor(
   return rows.filter(
     (r) => r.contractor_id !== null && String(r.contractor_id) === filterContractor,
   )
+}
+
+// ---------------------------------------------------------------------------
+// 维修单写操作分派（local / cloud 双模式，cloud 仅 RPC，fail-closed，可独立单测）
+// ---------------------------------------------------------------------------
+
+/**
+ * 按模式分派维修单写操作（低层）：
+ * - local：调用 localRun 恰好一次（同步 OpResult），绝不触碰 getRpcFn / cloudRun；
+ * - cloud：先求值 getRpcFn（同步 throw 时 fail-closed），再执行 cloudRun（内部仅 rdb.rpc）；
+ *   失败返回 fallback，绝不调用 localRun、绝不回退 DataService/localStorage。
+ * 返回 Promise 永不 reject。
+ */
+export async function dispatchRepairMutation<T>(
+  mode: RepairDataMode,
+  getRpcFn: () => RepairMutationRpcClient,
+  cloudRun: (rpc: RepairMutationRpcClient) => Promise<T>,
+  localRun: () => T,
+  fallback: T,
+): Promise<T> {
+  if (mode === 'local') {
+    return localRun()
+  }
+  try {
+    const rpc = getRpcFn()
+    return await cloudRun(rpc)
+  } catch {
+    return fallback
+  }
+}
+
+/**
+ * 创建维修单写操作分派（在 getRpcFn / cloudRun / rpc 之前执行完整前置校验）。
+ * - cloud：先角色门禁（canCreate，非 admin/staff 立即返回无权限错误），再
+ *   validateCreateRepairFields(input)；任一失败立即返回安全/字段级错误
+ *   （getRpcFn / cloudRun / rpc 均 0 次、不回退本地）；
+ *   通过后才 getRpc → cloudRun（cloudRun 内 createRepairOrder 仍会再校验作为纵深防护）。
+ * - local：不执行 canCreate / 字段前置校验（local 由 dataService 内部校验），不回归。
+ * 返回 Promise 永不 reject。
+ */
+export async function dispatchRepairCreateMutation(
+  mode: RepairDataMode,
+  canCreate: boolean,
+  input: RepairCreateCloudInput,
+  getRpcFn: () => RepairMutationRpcClient,
+  cloudRun: (rpc: RepairMutationRpcClient) => Promise<OpResult<{ repair_id: number }>>,
+  localRun: () => OpResult<{ repair_id: number }>,
+): Promise<OpResult<{ repair_id: number }>> {
+  if (mode === 'cloud') {
+    if (!canCreate) {
+      return { ok: false, error: REPAIR_PERMISSION_ERROR }
+    }
+    const v = validateCreateRepairFields(input)
+    if (!v.ok) return { ok: false, error: v.error, field: v.field }
+  }
+  return dispatchRepairMutation<OpResult<{ repair_id: number }>>(
+    mode,
+    getRpcFn,
+    cloudRun,
+    localRun,
+    { ok: false, error: SAFE_REPAIR_WRITE_ERROR },
+  )
+}
+
+/**
+ * 开始维修写操作分派（在 getRpcFn / cloudRun / rpc 之前执行角色门禁与 repair_id 校验）。
+ * - cloud：非 contractor（canStart=false）立即返回无权限错误；非法 repair_id 返回 fallback；
+ * - local：不执行 canStart / repair_id 校验（local 由 dataService 内部校验），不回归。
+ * 返回 Promise 永不 reject。
+ */
+export async function dispatchRepairStartMutation(
+  mode: RepairDataMode,
+  canStart: boolean,
+  repairId: number,
+  getRpcFn: () => RepairMutationRpcClient,
+  cloudRun: (rpc: RepairMutationRpcClient) => Promise<OpResult>,
+  localRun: () => OpResult,
+  fallback: OpResult,
+): Promise<OpResult> {
+  if (mode === 'cloud') {
+    if (!canStart) return { ok: false, error: REPAIR_PERMISSION_ERROR }
+    if (!isPositiveSafeInt(repairId)) return fallback
+  }
+  return dispatchRepairMutation<OpResult>(mode, getRpcFn, cloudRun, localRun, fallback)
+}
+
+/**
+ * 完成维修写操作分派（在 getRpcFn / cloudRun / rpc 之前执行完整前置校验）。
+ * - cloud：先角色门禁（canComplete，非 contractor 立即返回无权限错误），再
+ *   validateCompleteRepairFields(input)；任一失败立即返回安全/字段级错误；
+ *   通过后才 getRpc → cloudRun（cloudRun 内 completeRepair 仍会再校验作为纵深防护）。
+ * - local：不执行 canComplete / 字段前置校验（local 由 dataService 内部校验），不回归。
+ * 返回 Promise 永不 reject。
+ */
+export async function dispatchRepairCompleteMutation(
+  mode: RepairDataMode,
+  canComplete: boolean,
+  input: RepairCompleteCloudInput,
+  getRpcFn: () => RepairMutationRpcClient,
+  cloudRun: (rpc: RepairMutationRpcClient) => Promise<OpResult>,
+  localRun: () => OpResult,
+): Promise<OpResult> {
+  if (mode === 'cloud') {
+    if (!canComplete) {
+      return { ok: false, error: REPAIR_PERMISSION_ERROR }
+    }
+    const v = validateCompleteRepairFields(input)
+    if (!v.ok) return { ok: false, error: v.error, field: v.field }
+  }
+  return dispatchRepairMutation<OpResult>(
+    mode,
+    getRpcFn,
+    cloudRun,
+    localRun,
+    { ok: false, error: SAFE_REPAIR_WRITE_ERROR },
+  )
+}
+
+// ---------------------------------------------------------------------------
+// 并发锁与云端读刷新控制器
+// ---------------------------------------------------------------------------
+
+/**
+ * 维修单写操作互斥锁：防止重复提交（同步 tryAcquire/release，Node 可单测）。
+ * 作为维修模块的独立并发锁，避免反向依赖其它模块。
+ */
+export class MutationLock {
+  private locked = false
+
+  tryAcquire(): boolean {
+    if (this.locked) return false
+    this.locked = true
+    return true
+  }
+
+  release(): void {
+    this.locked = false
+  }
+
+  get isLocked(): boolean {
+    return this.locked
+  }
+}
+
+/**
+ * 云端读刷新控制器（可测试纯逻辑，无 React 依赖）。
+ * 封装「mutation 成功后立即失效当前读 token → 触发重读」的顺序语义：
+ * - refreshIfNeeded：仅 cloud 且 result.ok 且 isActive() 为真时才刷新；
+ *   刷新第一步同步 `guard.begin()` 使旧读请求的 token 立即失效
+ *   （旧查询无论何时 resolve 都不能覆盖新结果），第二步调用 refetch。
+ * - isActive 由调用方注入（useRepairs 传入 `() => mountedRef.current`）：
+ *   组件已卸载（active=false）时，不失效 token、不推进代次、不 refetch、不写任何状态。
+ */
+export class CloudRepairRefresh {
+  private guard: LatestRequestGuard
+  private refetch: () => void
+  private isActive: () => boolean
+  private refreshCount = 0
+
+  constructor(guard: LatestRequestGuard, refetch: () => void, isActive: () => boolean) {
+    this.guard = guard
+    this.refetch = refetch
+    this.isActive = isActive
+  }
+
+  /** mutation 落地后调用：仅 cloud 且成功且组件仍活跃（isActive()）才刷新；失败 / local / 已卸载均不刷新。 */
+  refreshIfNeeded<T>(result: OpResult<T>, isCloud: boolean): OpResult<T> {
+    if (isCloud && result.ok && this.isActive()) {
+      this.guard.begin()
+      this.refreshCount += 1
+      this.refetch()
+    }
+    return result
+  }
+
+  /** 是否为新代次 token（供测试验证旧 token 已失效、新查询可落地）。 */
+  isLatest(token: number): boolean {
+    return this.guard.isLatest(token)
+  }
+
+  /** 触发刷新的次数（供测试断言「成功刷新、失败不刷新」）。 */
+  get refreshes(): number {
+    return this.refreshCount
+  }
 }

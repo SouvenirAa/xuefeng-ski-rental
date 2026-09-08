@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Button,
   DatePicker,
@@ -20,6 +20,10 @@ import { dataService } from '../../data/dataService'
 import type { ContractorInput } from '../../data/types'
 import type { ContractorView, ContractorRateView } from '../../data/cloudContractors'
 import { computeCurrentRateView } from '../../data/cloudContractors'
+import type {
+  ContractorCloudInput,
+  ContractorRateCloudInput,
+} from '../../data/cloudContractorMutations'
 import { isCloudMode } from '../../lib/cloudbase'
 import { useContractors } from '../../hooks/useContractors'
 import { formatMoney, today } from '../../utils/format'
@@ -30,7 +34,7 @@ interface ContractorFormState {
   address: string
   phone: string
   email: string
-  // 仅新增时使用（首条费率）
+  // 仅 local 新增时使用（首条费率）
   effective_date: string
   hourly_rate: number | undefined
 }
@@ -62,24 +66,68 @@ function toContractorInput(f: ContractorFormState): ContractorInput {
   return { name: f.name, address: f.address, phone: f.phone, email: f.email }
 }
 
+/** 表单 → cloud 可空输入：address/phone/email 空串归一化为 null（不写虚构文本） */
+function toContractorCloudInput(f: ContractorFormState): ContractorCloudInput {
+  return {
+    name: f.name,
+    address: f.address.trim() === '' ? null : f.address.trim(),
+    phone: f.phone.trim() === '' ? null : f.phone.trim(),
+    email: f.email.trim() === '' ? null : f.email.trim(),
+  }
+}
+
+/** 费率表单 → cloud 费率输入（未填 hourly_rate 归一化为 0，由校验层拒绝「必须大于 0」） */
+function toRateCloudInput(f: RateFormState): ContractorRateCloudInput {
+  return { effective_date: f.effective_date, hourly_rate: f.hourly_rate ?? 0 }
+}
+
 export function Contractors() {
   const { role } = useAuth()
   const isCloud = isCloudMode()
-  const { contractors, rates, loading, error, retry } = useContractors()
+  const {
+    contractors,
+    rates,
+    referencedRateIds,
+    loading,
+    error,
+    retry,
+    createContractor,
+    updateContractor,
+    removeContractor,
+    createRate,
+    updateRate,
+    removeRate,
+    mutating,
+  } = useContractors()
   const [keyword, setKeyword] = useState('')
 
-  // 承包商表单 Drawer（仅 local 使用）
+  // 写权限：仅 admin（cloud/local 统一；staff/contractor 由路由层 /contractors 拦截 403）
+  const canWrite = role === 'admin'
+
+  // 被维修单引用的费率集合（cloud：来自云端查询；local：空，走 dataService.isContractorRateReferenced）
+  const referencedSet = useMemo(() => new Set(referencedRateIds), [referencedRateIds])
+
+  // 卸载防护：异步保存/删除返回后，组件已卸载则不再写状态 / 触发全局消息
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
+
+  // 承包商表单 Drawer
   const [formVisible, setFormVisible] = useState(false)
   const [editingContractor, setEditingContractor] = useState<ContractorView | null>(null)
   const [contractorForm, setContractorForm] = useState<ContractorFormState>(emptyContractorForm)
   const [contractorFieldError, setContractorFieldError] = useState<Record<string, string>>({})
   const [submittingContractor, setSubmittingContractor] = useState(false)
 
-  // 详情 Drawer（local / cloud 均只读展示）
+  // 详情 Drawer（local / cloud 均展示承包商资料 + 费率历史）
   const [detailVisible, setDetailVisible] = useState(false)
   const [detailContractor, setDetailContractor] = useState<ContractorView | null>(null)
 
-  // 费率表单 Dialog（仅 local 使用）
+  // 费率表单 Dialog
   const [rateFormVisible, setRateFormVisible] = useState(false)
   const [editingRate, setEditingRate] = useState<ContractorRateView | null>(null)
   const [rateForm, setRateForm] = useState<RateFormState>(emptyRateForm)
@@ -104,16 +152,16 @@ export function Contractors() {
   const { page, pageSize, setPage, setPageSize, paged, total } = usePagination(filtered, 10)
 
   const openCreate = () => {
-    if (isCloud) return
+    if (!canWrite) return
     setEditingContractor(null)
-    // 首条费率生效日期默认当天（每次点击重新取，避免模块加载时缓存日期）
+    // 首条费率生效日期默认当天（仅 local 新增使用；cloud 新增无首条费率）
     setContractorForm({ ...emptyContractorForm, effective_date: today() })
     setContractorFieldError({})
     setFormVisible(true)
   }
 
   const openEdit = (c: ContractorView) => {
-    if (isCloud) return
+    if (!canWrite) return
     setEditingContractor(c)
     setContractorForm({
       name: c.name,
@@ -132,8 +180,29 @@ export function Contractors() {
     setDetailVisible(true)
   }
 
-  const handleSaveContractor = () => {
-    if (submittingContractor || !role || isCloud) return
+  const handleSaveContractor = async () => {
+    if (isCloud) {
+      if (mutating || !canWrite) return
+      const result = editingContractor
+        ? await updateContractor(editingContractor.contractor_id, toContractorCloudInput(contractorForm))
+        : await createContractor(toContractorCloudInput(contractorForm))
+      // 组件已卸载：不再写状态、不触发全局消息
+      if (!mountedRef.current) return
+      if (result.ok) {
+        MessagePlugin.success(editingContractor ? '承包商已更新' : '承包商已新增')
+        setFormVisible(false)
+      } else {
+        if (result.field) {
+          setContractorFieldError({ [result.field]: result.error })
+        } else {
+          MessagePlugin.error(result.error)
+        }
+      }
+      return
+    }
+
+    // local：保持既有同步流程（新增含首条费率，原子创建）
+    if (submittingContractor || !role) return
     setSubmittingContractor(true)
     const result = editingContractor
       ? dataService.updateContractor(role, editingContractor.contractor_id, toContractorInput(contractorForm))
@@ -158,8 +227,21 @@ export function Contractors() {
     }
   }
 
-  const handleDeleteContractor = (c: ContractorView) => {
-    if (!role || isCloud) return
+  const handleDeleteContractor = async (c: ContractorView) => {
+    if (isCloud) {
+      if (!canWrite) return
+      const result = await removeContractor(c.contractor_id)
+      if (!mountedRef.current) return
+      if (result.ok) {
+        MessagePlugin.success('承包商已删除')
+      } else {
+        MessagePlugin.error(result.error)
+      }
+      return
+    }
+
+    // local：保持既有同步流程
+    if (!role) return
     const result = dataService.removeContractor(role, c.contractor_id)
     if (result.ok) {
       MessagePlugin.success('承包商已删除')
@@ -170,7 +252,7 @@ export function Contractors() {
 
   // ---- 费率 ----
   const openCreateRate = () => {
-    if (isCloud) return
+    if (!canWrite) return
     setEditingRate(null)
     setRateForm(emptyRateForm)
     setRateFieldError({})
@@ -178,15 +260,36 @@ export function Contractors() {
   }
 
   const openEditRate = (r: ContractorRateView) => {
-    if (isCloud) return
+    if (!canWrite) return
     setEditingRate(r)
     setRateForm({ effective_date: r.effective_date, hourly_rate: r.hourly_rate })
     setRateFieldError({})
     setRateFormVisible(true)
   }
 
-  const handleSaveRate = () => {
-    if (submittingRate || !role || !detailContractor || isCloud) return
+  const handleSaveRate = async () => {
+    if (!detailContractor) return
+    if (isCloud) {
+      if (mutating || !canWrite) return
+      const result = editingRate
+        ? await updateRate(editingRate.rate_id, toRateCloudInput(rateForm))
+        : await createRate(detailContractor.contractor_id, toRateCloudInput(rateForm))
+      if (!mountedRef.current) return
+      if (result.ok) {
+        MessagePlugin.success(editingRate ? '费率已更新' : '费率已新增')
+        setRateFormVisible(false)
+      } else {
+        if (result.field) {
+          setRateFieldError({ [result.field]: result.error })
+        } else {
+          MessagePlugin.error(result.error)
+        }
+      }
+      return
+    }
+
+    // local：保持既有同步流程
+    if (submittingRate || !role) return
     setSubmittingRate(true)
     const result = editingRate
       ? dataService.updateContractorRate(role, editingRate.rate_id, {
@@ -211,8 +314,21 @@ export function Contractors() {
     }
   }
 
-  const handleDeleteRate = (r: ContractorRateView) => {
-    if (!role || isCloud) return
+  const handleDeleteRate = async (r: ContractorRateView) => {
+    if (isCloud) {
+      if (!canWrite) return
+      const result = await removeRate(r.rate_id)
+      if (!mountedRef.current) return
+      if (result.ok) {
+        MessagePlugin.success('费率已删除')
+      } else {
+        MessagePlugin.error(result.error)
+      }
+      return
+    }
+
+    // local：保持既有同步流程
+    if (!role) return
     const result = dataService.removeContractorRate(role, r.rate_id)
     if (result.ok) {
       MessagePlugin.success('费率已删除')
@@ -246,23 +362,24 @@ export function Contractors() {
       width: 200,
       fixed: 'right',
       cell: ({ row }) => {
-        if (isCloud) {
+        const detailBtn = (
+          <Button size="small" variant="text" theme="primary" onClick={() => openDetail(row)}>
+            详情
+          </Button>
+        )
+        if (isCloud && !canWrite) {
           return (
             <Space>
-              <Button size="small" variant="text" theme="primary" onClick={() => openDetail(row)}>
-                详情
-              </Button>
+              {detailBtn}
               <span style={{ color: 'var(--snowpeak-text-placeholder)', fontSize: 12 }}>
-                云端写入待迁移
+                仅管理员可操作
               </span>
             </Space>
           )
         }
         return (
           <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-            <Button size="small" variant="text" theme="primary" onClick={() => openDetail(row)}>
-              详情
-            </Button>
+            {detailBtn}
             <Button size="small" variant="text" theme="primary" onClick={() => openEdit(row)}>
               编辑
             </Button>
@@ -287,6 +404,12 @@ export function Contractors() {
         .sort((a, b) => (a.effective_date < b.effective_date ? 1 : -1))
     : []
 
+  /** 费率是否被维修单引用：cloud 用云端 referencedSet，local 用 dataService.isContractorRateReferenced */
+  const isRateReferenced = (rateId: number): boolean => {
+    if (isCloud) return referencedSet.has(rateId)
+    return dataService.isContractorRateReferenced(rateId)
+  }
+
   const rateColumns: PrimaryTableCol<ContractorRateView>[] = [
     { colKey: 'effective_date', title: '生效日期', width: 130 },
     {
@@ -299,19 +422,8 @@ export function Contractors() {
       colKey: 'referenced',
       title: '引用状态',
       width: 110,
-      cell: ({ row }) => {
-        if (isCloud) {
-          // cloud 无法判断是否被维修单引用，显示「云端只读」，绝不展示虚假引用状态
-          return (
-            <Tag
-              variant="light"
-              style={{ color: 'var(--snowpeak-text-secondary)', background: 'var(--snowpeak-bg-page)', borderColor: 'transparent' }}
-            >
-              云端只读
-            </Tag>
-          )
-        }
-        return dataService.isContractorRateReferenced(row.rate_id) ? (
+      cell: ({ row }) =>
+        isRateReferenced(row.rate_id) ? (
           <Tag variant="light" style={{ color: 'var(--snowpeak-text-secondary)', background: 'var(--snowpeak-bg-page)', borderColor: 'transparent' }}>
             已被维修单引用
           </Tag>
@@ -319,22 +431,21 @@ export function Contractors() {
           <Tag variant="light" style={{ color: 'var(--snowpeak-success)', background: 'var(--snowpeak-success-subtle)', borderColor: 'transparent' }}>
             可编辑
           </Tag>
-        )
-      },
+        ),
     },
     {
       colKey: 'op',
       title: '操作',
       width: 130,
       cell: ({ row }) => {
-        if (isCloud) {
+        if (isCloud && !canWrite) {
           return (
             <span style={{ color: 'var(--snowpeak-text-placeholder)', fontSize: 12 }}>
-              云端写入待迁移
+              仅管理员可操作
             </span>
           )
         }
-        const referenced = dataService.isContractorRateReferenced(row.rate_id)
+        const referenced = isRateReferenced(row.rate_id)
         return (
           <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
             <Button size="small" variant="text" theme="primary" disabled={referenced} onClick={() => openEditRate(row)}>
@@ -367,7 +478,7 @@ export function Contractors() {
         title="承包商与费率管理"
         subtitle={
           isCloud
-            ? 'CloudBase PostgreSQL · 只读阶段'
+            ? 'CloudBase PostgreSQL · 云端数据'
             : '维护承包商资料与历史费率（仅管理员可访问）'
         }
       />
@@ -382,7 +493,7 @@ export function Contractors() {
             prefixIcon={<SearchIcon />}
             style={{ width: 280 }}
           />
-          {!isCloud && (
+          {canWrite && (
             <Button theme="primary" icon={<AddIcon />} onClick={openCreate}>
               新增承包商
             </Button>
@@ -427,76 +538,80 @@ export function Contractors() {
         />
       </div>
 
-      {/* 承包商表单 Drawer（新增含首条费率，编辑不含费率）—— 仅 local */}
-      {!isCloud && (
-        <Drawer
-          visible={formVisible}
-          header={editingContractor ? '编辑承包商' : '新增承包商'}
-          size="480px"
-          onClose={() => setFormVisible(false)}
-          footer={
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-              <Button variant="outline" onClick={() => setFormVisible(false)} style={{ minWidth: 80 }}>
-                取消
-              </Button>
-              <Button theme="primary" loading={submittingContractor} onClick={handleSaveContractor} style={{ minWidth: 96 }}>
-                保存
-              </Button>
-            </div>
-          }
-        >
-          <div style={{ padding: '4px 0' }}>
-            <div style={{ marginBottom: 16 }}>
-              <label style={fieldLabel}>名称 <span style={{ color: 'var(--snowpeak-danger)' }}>*</span></label>
-              <Input value={contractorForm.name} onChange={(v) => setContractorForm((p) => ({ ...p, name: String(v) }))} placeholder="如 峰顶装备维修" status={contractorFieldError.name ? 'error' : 'default'} tips={contractorFieldError.name} />
-            </div>
-            <div style={{ marginBottom: 16 }}>
-              <label style={fieldLabel}>电话</label>
-              <Input value={contractorForm.phone} onChange={(v) => setContractorForm((p) => ({ ...p, phone: String(v) }))} placeholder="选填" />
-            </div>
-            <div style={{ marginBottom: 16 }}>
-              <label style={fieldLabel}>邮箱</label>
-              <Input value={contractorForm.email} onChange={(v) => setContractorForm((p) => ({ ...p, email: String(v) }))} placeholder="选填" />
-            </div>
-            <div style={{ marginBottom: 16 }}>
-              <label style={fieldLabel}>地址</label>
-              <Input value={contractorForm.address} onChange={(v) => setContractorForm((p) => ({ ...p, address: String(v) }))} placeholder="选填" />
-            </div>
-
-            {!editingContractor && (
-              <div style={{ borderTop: '1px solid var(--snowpeak-border)', paddingTop: 16, marginTop: 4 }}>
-                <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 12 }}>首条费率</div>
-                <div style={{ marginBottom: 16 }}>
-                  <label style={fieldLabel}>生效日期 <span style={{ color: 'var(--snowpeak-danger)' }}>*</span></label>
-                  <DatePicker
-                    value={contractorForm.effective_date || undefined}
-                    onChange={(v) => setContractorForm((p) => ({ ...p, effective_date: v ? String(v) : '' }))}
-                    placeholder="请选择生效日期"
-                    status={contractorFieldError.effective_date ? 'error' : 'default'}
-                    tips={contractorFieldError.effective_date}
-                    style={{ width: '100%' }}
-                  />
-                </div>
-                <div style={{ marginBottom: 16 }}>
-                  <label style={fieldLabel}>小时费率（元） <span style={{ color: 'var(--snowpeak-danger)' }}>*</span></label>
-                  <InputNumber
-                    value={contractorForm.hourly_rate}
-                    onChange={(v) => setContractorForm((p) => ({ ...p, hourly_rate: v as number | undefined }))}
-                    min={0}
-                    theme="normal"
-                    placeholder="如 180"
-                    status={contractorFieldError.hourly_rate ? 'error' : 'default'}
-                    tips={contractorFieldError.hourly_rate}
-                    style={{ width: '100%' }}
-                  />
-                </div>
-              </div>
-            )}
+      {/* 承包商表单 Drawer（cloud 仅基础资料；local 新增含首条费率，编辑不含费率） */}
+      <Drawer
+        visible={formVisible}
+        header={editingContractor ? '编辑承包商' : '新增承包商'}
+        size="480px"
+        onClose={() => setFormVisible(false)}
+        footer={
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+            <Button variant="outline" onClick={() => setFormVisible(false)} style={{ minWidth: 80 }}>
+              取消
+            </Button>
+            <Button
+              theme="primary"
+              loading={isCloud ? mutating : submittingContractor}
+              onClick={handleSaveContractor}
+              style={{ minWidth: 96 }}
+            >
+              保存
+            </Button>
           </div>
-        </Drawer>
-      )}
+        }
+      >
+        <div style={{ padding: '4px 0' }}>
+          <div style={{ marginBottom: 16 }}>
+            <label style={fieldLabel}>名称 <span style={{ color: 'var(--snowpeak-danger)' }}>*</span></label>
+            <Input value={contractorForm.name} onChange={(v) => setContractorForm((p) => ({ ...p, name: String(v) }))} placeholder="如 峰顶装备维修" status={contractorFieldError.name ? 'error' : 'default'} tips={contractorFieldError.name} />
+          </div>
+          <div style={{ marginBottom: 16 }}>
+            <label style={fieldLabel}>电话</label>
+            <Input value={contractorForm.phone} onChange={(v) => setContractorForm((p) => ({ ...p, phone: String(v) }))} placeholder="选填" status={contractorFieldError.phone ? 'error' : 'default'} tips={contractorFieldError.phone} />
+          </div>
+          <div style={{ marginBottom: 16 }}>
+            <label style={fieldLabel}>邮箱</label>
+            <Input value={contractorForm.email} onChange={(v) => setContractorForm((p) => ({ ...p, email: String(v) }))} placeholder="选填" status={contractorFieldError.email ? 'error' : 'default'} tips={contractorFieldError.email} />
+          </div>
+          <div style={{ marginBottom: 16 }}>
+            <label style={fieldLabel}>地址</label>
+            <Input value={contractorForm.address} onChange={(v) => setContractorForm((p) => ({ ...p, address: String(v) }))} placeholder="选填" status={contractorFieldError.address ? 'error' : 'default'} tips={contractorFieldError.address} />
+          </div>
 
-      {/* 详情 Drawer：承包商资料 + 费率历史（local / cloud 均只读展示） */}
+          {/* 首条费率：仅 local 新增时显示（cloud 无原子创建，费率经详情 Drawer 单独新增） */}
+          {!isCloud && !editingContractor && (
+            <div style={{ borderTop: '1px solid var(--snowpeak-border)', paddingTop: 16, marginTop: 4 }}>
+              <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 12 }}>首条费率</div>
+              <div style={{ marginBottom: 16 }}>
+                <label style={fieldLabel}>生效日期 <span style={{ color: 'var(--snowpeak-danger)' }}>*</span></label>
+                <DatePicker
+                  value={contractorForm.effective_date || undefined}
+                  onChange={(v) => setContractorForm((p) => ({ ...p, effective_date: v ? String(v) : '' }))}
+                  placeholder="请选择生效日期"
+                  status={contractorFieldError.effective_date ? 'error' : 'default'}
+                  tips={contractorFieldError.effective_date}
+                  style={{ width: '100%' }}
+                />
+              </div>
+              <div style={{ marginBottom: 16 }}>
+                <label style={fieldLabel}>小时费率（元） <span style={{ color: 'var(--snowpeak-danger)' }}>*</span></label>
+                <InputNumber
+                  value={contractorForm.hourly_rate}
+                  onChange={(v) => setContractorForm((p) => ({ ...p, hourly_rate: v as number | undefined }))}
+                  min={0}
+                  theme="normal"
+                  placeholder="如 180"
+                  status={contractorFieldError.hourly_rate ? 'error' : 'default'}
+                  tips={contractorFieldError.hourly_rate}
+                  style={{ width: '100%' }}
+                />
+              </div>
+            </div>
+          )}
+        </div>
+      </Drawer>
+
+      {/* 详情 Drawer：承包商资料 + 费率历史（local / cloud 均展示） */}
       <Drawer
         visible={detailVisible}
         header={detailContractor ? `承包商详情：${detailContractor.name}` : '承包商详情'}
@@ -520,7 +635,7 @@ export function Contractors() {
 
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
               <span style={{ fontSize: 14, fontWeight: 600 }}>费率历史</span>
-              {!isCloud && (
+              {canWrite && (
                 <Button size="small" theme="primary" icon={<AddIcon />} onClick={openCreateRate}>
                   新增费率
                 </Button>
@@ -538,45 +653,43 @@ export function Contractors() {
         )}
       </Drawer>
 
-      {/* 费率表单 Dialog —— 仅 local */}
-      {!isCloud && (
-        <Dialog
-          visible={rateFormVisible}
-          header={editingRate ? '编辑费率' : '新增费率'}
-          width={440}
-          confirmBtn={{ content: '保存', theme: 'primary', loading: submittingRate }}
-          cancelBtn="取消"
-          onConfirm={handleSaveRate}
-          onClose={() => setRateFormVisible(false)}
-        >
-          <div style={{ padding: '8px 0' }}>
-            <div style={{ marginBottom: 16 }}>
-              <label style={fieldLabel}>生效日期 <span style={{ color: 'var(--snowpeak-danger)' }}>*</span></label>
-              <DatePicker
-                value={rateForm.effective_date || undefined}
-                onChange={(v) => setRateForm((p) => ({ ...p, effective_date: v ? String(v) : '' }))}
-                placeholder="请选择生效日期"
-                status={rateFieldError.effective_date ? 'error' : 'default'}
-                tips={rateFieldError.effective_date}
-                style={{ width: '100%' }}
-              />
-            </div>
-            <div style={{ marginBottom: 16 }}>
-              <label style={fieldLabel}>小时费率（元） <span style={{ color: 'var(--snowpeak-danger)' }}>*</span></label>
-              <InputNumber
-                value={rateForm.hourly_rate}
-                onChange={(v) => setRateForm((p) => ({ ...p, hourly_rate: v as number | undefined }))}
-                min={0}
-                theme="normal"
-                placeholder="如 180"
-                status={rateFieldError.hourly_rate ? 'error' : 'default'}
-                tips={rateFieldError.hourly_rate}
-                style={{ width: '100%' }}
-              />
-            </div>
+      {/* 费率表单 Dialog（local / cloud 均使用） */}
+      <Dialog
+        visible={rateFormVisible}
+        header={editingRate ? '编辑费率' : '新增费率'}
+        width={440}
+        confirmBtn={{ content: '保存', theme: 'primary', loading: isCloud ? mutating : submittingRate }}
+        cancelBtn="取消"
+        onConfirm={handleSaveRate}
+        onClose={() => setRateFormVisible(false)}
+      >
+        <div style={{ padding: '8px 0' }}>
+          <div style={{ marginBottom: 16 }}>
+            <label style={fieldLabel}>生效日期 <span style={{ color: 'var(--snowpeak-danger)' }}>*</span></label>
+            <DatePicker
+              value={rateForm.effective_date || undefined}
+              onChange={(v) => setRateForm((p) => ({ ...p, effective_date: v ? String(v) : '' }))}
+              placeholder="请选择生效日期"
+              status={rateFieldError.effective_date ? 'error' : 'default'}
+              tips={rateFieldError.effective_date}
+              style={{ width: '100%' }}
+            />
           </div>
-        </Dialog>
-      )}
+          <div style={{ marginBottom: 16 }}>
+            <label style={fieldLabel}>小时费率（元） <span style={{ color: 'var(--snowpeak-danger)' }}>*</span></label>
+            <InputNumber
+              value={rateForm.hourly_rate}
+              onChange={(v) => setRateForm((p) => ({ ...p, hourly_rate: v as number | undefined }))}
+              min={0}
+              theme="normal"
+              placeholder="如 180"
+              status={rateFieldError.hourly_rate ? 'error' : 'default'}
+              tips={rateFieldError.hourly_rate}
+              style={{ width: '100%' }}
+            />
+          </div>
+        </div>
+      </Dialog>
     </div>
   )
 }

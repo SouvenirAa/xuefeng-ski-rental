@@ -21,6 +21,11 @@
     "validate:cloud-workforce-read": "node scripts/validate-cloud-workforce-read.mjs",
     "validate:cloud-contract-read": "node scripts/validate-cloud-contract-read.mjs",
     "validate:cloud-repair-read": "node scripts/validate-cloud-repair-read.mjs",
+    "validate:cloud-contractor-write": "node scripts/validate-cloud-contractor-write.mjs",
+    "validate:cloud-workforce-write": "node scripts/validate-cloud-workforce-write.mjs",
+    "validate:cloud-contract-write": "node scripts/validate-cloud-contract-write.mjs",
+    "validate:cloud-repair-write": "node scripts/validate-cloud-repair-write.mjs",
+    "validate:cloud-dashboard": "node scripts/validate-cloud-dashboard.mjs",
     "audit:migrations": "node scripts/audit-migrations.mjs"
   },
   "dependencies": {

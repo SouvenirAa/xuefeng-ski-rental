@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import {
   Button,
@@ -19,16 +19,14 @@ import { ChevronLeftIcon } from 'tdesign-icons-react'
 import { PageHeader } from '../../components/PageHeader'
 import { StatusTag } from '../../components/StatusTag'
 import { useAuth } from '../../auth/AuthContext'
-import { dataService } from '../../data/dataService'
-import type { RentalItem } from '../../data/types'
 import type {
   ContractChangeView,
   ContractLineView,
   ItemRefView,
 } from '../../data/cloudContracts'
 import { formatDateTime, formatMoney, today } from '../../utils/format'
-import { useDbData, type UseDbDataOptions } from '../../hooks/useDbData'
 import { useContractDetail } from '../../hooks/useContractDetail'
+import { useMasterData } from '../../hooks/useMasterData'
 import { parseContractIdParam } from '../../data/contractDataSource'
 import { isCloudMode } from '../../lib/cloudbase'
 
@@ -52,9 +50,6 @@ interface LineRow {
   return_store_name: string
 }
 
-/** 稳定空设备数组：cloud 模式下 useDbData 的 disabledValue */
-const EMPTY_ITEMS: RentalItem[] = []
-
 export function ContractDetail() {
   const { id } = useParams()
   const navigate = useNavigate()
@@ -63,22 +58,41 @@ export function ContractDetail() {
   const contractId = parseContractIdParam(id)
   const isCloud = isCloudMode()
 
-  const { detail, loading, error, notFound, invalid, retry } = useContractDetail(contractId)
+  const {
+    detail,
+    loading,
+    error,
+    notFound,
+    invalid,
+    retry,
+    exchangeItem,
+    returnItems,
+    mutating,
+  } = useContractDetail(contractId)
 
   // 门店名解析：优先用详情自带 stores（local/cloud 均可用）；local 的详情视图已含 stores。
   const stores = useMemo(() => detail?.stores ?? [], [detail])
 
-  // 完整设备列表仅本地模式的换货候选/差价预估需要；cloud 模式或非法 ID 下零订阅零 read。
-  const itemsOptions: UseDbDataOptions<RentalItem[]> = isCloud || invalid
-    ? { enabled: false, disabledValue: EMPTY_ITEMS }
-    : { enabled: true }
-  const items = useDbData(() => dataService.listItems(), itemsOptions)
+  // 完整设备列表（换货候选/差价预估）：local/cloud 双模式均可用（useMasterData 内部按模式分派）。
+  const { items } = useMasterData()
+
+  // 换货/归还写权限：仅 admin/staff（路由层已拦截 contractor；此处与 Hook 门禁一致，纵深防护）。
+  const canWrite = role === 'admin' || role === 'staff'
+
+  // 卸载防护：异步保存/删除返回后，组件已卸载则不再写状态 / 触发全局消息
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
 
   const contract = detail?.contract ?? null
   const lines = useMemo(() => detail?.lines ?? [], [detail])
   const changes = useMemo(() => detail?.changes ?? [], [detail])
 
-  // 换货 Dialog 状态（仅 local 使用）
+  // 换货 Dialog 状态
   const [exchangeVisible, setExchangeVisible] = useState(false)
   const [exchangeLine, setExchangeLine] = useState<ContractLineView | null>(null)
   const [newItemId, setNewItemId] = useState<number | undefined>(undefined)
@@ -87,7 +101,7 @@ export function ContractDetail() {
   const [exchangeSubmitting, setExchangeSubmitting] = useState(false)
   const [exchangeError, setExchangeError] = useState<Record<string, string>>({})
 
-  // 归还 Dialog 状态（仅 local 使用）
+  // 归还 Dialog 状态
   const [returnVisible, setReturnVisible] = useState(false)
   const [returnLineIds, setReturnLineIds] = useState<number[]>([])
   const [returnStoreId2, setReturnStoreId2] = useState<number | undefined>(undefined)
@@ -114,7 +128,7 @@ export function ContractDetail() {
   )
   const exchangeNewItem = newItemId ? items.find((i) => i.item_id === newItemId) ?? null : null
 
-  // 换货预估差价（仅展示，最终由 DataService 复算）。
+  // 换货预估差价（仅展示，最终由服务端 RPC 复算）。
   // 口径与服务层一致：新设备本次目录价 − 旧明细合同快照 daily_rate（而非目录价）。
   const exchangePreview = useMemo(() => {
     if (!exchangeLine || !exchangeNewItem || !contract) return null
@@ -143,10 +157,7 @@ export function ContractDetail() {
   if (invalid) {
     return (
       <div>
-        <PageHeader
-          title="合同详情"
-          subtitle={isCloud ? 'CloudBase PostgreSQL · 只读阶段' : undefined}
-        />
+        <PageHeader title="合同详情" subtitle={isCloud ? 'CloudBase PostgreSQL' : undefined} />
         <Empty description="合同编号无效" />
       </div>
     )
@@ -155,7 +166,7 @@ export function ContractDetail() {
   if (isCloud && loading) {
     return (
       <div>
-        <PageHeader title="合同详情" subtitle="CloudBase PostgreSQL · 只读阶段" />
+        <PageHeader title="合同详情" subtitle="CloudBase PostgreSQL" />
         <div style={{ display: 'flex', justifyContent: 'center', padding: 48 }}>
           <Loading text="加载中..." />
         </div>
@@ -166,7 +177,7 @@ export function ContractDetail() {
   if (isCloud && error) {
     return (
       <div>
-        <PageHeader title="合同详情" subtitle="CloudBase PostgreSQL · 只读阶段" />
+        <PageHeader title="合同详情" subtitle="CloudBase PostgreSQL" />
         <div
           style={{
             display: 'flex',
@@ -191,16 +202,14 @@ export function ContractDetail() {
   if (notFound || !contract) {
     return (
       <div>
-        <PageHeader
-          title="合同详情"
-          subtitle={isCloud ? 'CloudBase PostgreSQL · 只读阶段' : undefined}
-        />
+        <PageHeader title="合同详情" subtitle={isCloud ? 'CloudBase PostgreSQL' : undefined} />
         <Empty description="合同不存在或已被删除" />
       </div>
     )
   }
 
   const openExchange = (line: ContractLineView) => {
+    if (!canWrite) return
     setExchangeLine(line)
     setNewItemId(undefined)
     setReturnStoreId(line.checkout_store_id)
@@ -209,10 +218,10 @@ export function ContractDetail() {
     setExchangeVisible(true)
   }
 
-  const handleExchange = () => {
-    if (exchangeSubmitting || !role || !exchangeLine) return
+  const handleExchange = async () => {
+    if (exchangeSubmitting || mutating || !role || !exchangeLine) return
     setExchangeSubmitting(true)
-    const result = dataService.exchangeItem(role, {
+    const result = await exchangeItem({
       contract_id: contract.contract_id,
       old_line_id: exchangeLine.contract_line_id,
       new_item_id: newItemId as number,
@@ -221,9 +230,10 @@ export function ContractDetail() {
     })
     setExchangeSubmitting(false)
 
+    if (!mountedRef.current) return
+
     if (result.ok) {
-      const d = result.data.amount_delta
-      MessagePlugin.success(d >= 0 ? `换货完成，补收 ${formatMoney(d)}` : `换货完成，退款 ${formatMoney(-d)}`)
+      MessagePlugin.success('换货完成，明细已更新')
       setExchangeVisible(false)
     } else {
       if (result.field) setExchangeError({ [result.field]: result.error })
@@ -232,6 +242,7 @@ export function ContractDetail() {
   }
 
   const openReturn = (lineIds: number[]) => {
+    if (!canWrite) return
     setReturnLineIds(lineIds)
     const first = lines.find((l) => lineIds.includes(l.line.contract_line_id))
     setReturnStoreId2(first?.line.checkout_store_id ?? undefined)
@@ -239,18 +250,20 @@ export function ContractDetail() {
     setReturnVisible(true)
   }
 
-  const handleReturn = () => {
-    if (returnSubmitting || !role) return
+  const handleReturn = async () => {
+    if (returnSubmitting || mutating || !role) return
     setReturnSubmitting(true)
-    const result = dataService.returnItems(role, {
+    const result = await returnItems({
       contract_id: contract.contract_id,
       line_ids: returnLineIds,
       return_store_id: returnStoreId2 as number,
     })
     setReturnSubmitting(false)
 
+    if (!mountedRef.current) return
+
     if (result.ok) {
-      MessagePlugin.success(result.data.contract.status === '已完成' ? '全部归还，合同已完成' : '归还成功')
+      MessagePlugin.success('归还成功')
       setReturnVisible(false)
     } else {
       if (result.field) setReturnError({ [result.field]: result.error })
@@ -288,10 +301,8 @@ export function ContractDetail() {
       width: 90,
       cell: ({ row }) => <StatusTag status={row.line.status} />,
     },
-    // 操作列仅在 local 模式存在（cloud 只读，隐藏换货/单件归还）
-    ...(isCloud
-      ? []
-      : [
+    ...(canWrite
+      ? [
           {
             colKey: 'op',
             title: '操作',
@@ -317,7 +328,8 @@ export function ContractDetail() {
               )
             },
           },
-        ]),
+        ]
+      : []),
   ]
 
   const lineRows: LineRow[] = lines.map((l) => ({
@@ -338,7 +350,7 @@ export function ContractDetail() {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16 }}>
         <PageHeader
           title={`合同 ${contract.contract_no}`}
-          subtitle={isCloud ? 'CloudBase PostgreSQL · 只读阶段' : '查看明细、执行换货与归还'}
+          subtitle={isCloud ? 'CloudBase PostgreSQL' : '查看明细、执行换货与归还'}
         />
         <StatusTag status={contract.status} />
       </div>
@@ -363,7 +375,7 @@ export function ContractDetail() {
       <div style={{ background: 'var(--snowpeak-bg-container)', border: '1px solid var(--snowpeak-border)', borderRadius: 8, marginBottom: 16 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', borderBottom: '1px solid var(--snowpeak-border)' }}>
           <span style={{ fontSize: 14, fontWeight: 600 }}>合同明细</span>
-          {!isCloud && !isCompleted && activeLines.length > 0 && (
+          {canWrite && !isCompleted && activeLines.length > 0 && (
             <Button size="small" variant="outline" onClick={() => openReturn(activeLines.map((l) => l.line.contract_line_id))}>
               批量归还（{activeLines.length}）
             </Button>
@@ -429,14 +441,14 @@ export function ContractDetail() {
         )}
       </div>
 
-      {/* 换货 / 归还 Dialog —— 仅 local 模式 */}
-      {!isCloud && (
+      {/* 换货 / 归还 Dialog（admin/staff） */}
+      {canWrite && (
         <>
           <Dialog
             visible={exchangeVisible}
             header="换货"
             width={520}
-            confirmBtn={{ content: '确认换货', theme: 'primary', loading: exchangeSubmitting }}
+            confirmBtn={{ content: '确认换货', theme: 'primary', loading: exchangeSubmitting || mutating }}
             cancelBtn="取消"
             onConfirm={handleExchange}
             onClose={() => setExchangeVisible(false)}
@@ -531,7 +543,7 @@ export function ContractDetail() {
             visible={returnVisible}
             header="归还"
             width={520}
-            confirmBtn={{ content: '确认归还', theme: 'primary', loading: returnSubmitting }}
+            confirmBtn={{ content: '确认归还', theme: 'primary', loading: returnSubmitting || mutating }}
             cancelBtn="取消"
             onConfirm={handleReturn}
             onClose={() => setReturnVisible(false)}

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Button,
   DatePicker,
@@ -15,9 +15,8 @@ import {
 import { AddIcon, ChevronLeftIcon, ChevronRightIcon, DeleteIcon, SearchIcon } from 'tdesign-icons-react'
 import { PageHeader } from '../../components/PageHeader'
 import { useAuth } from '../../auth/AuthContext'
-import { dataService } from '../../data/dataService'
-import type { EmployeeInput, ShiftInput } from '../../data/types'
 import type { EmployeeView, ShiftView } from '../../data/cloudWorkforce'
+import type { EmployeeCloudInput, ShiftCloudInput } from '../../data/cloudWorkforceMutations'
 import { isCloudMode } from '../../lib/cloudbase'
 import { useWorkforce } from '../../hooks/useWorkforce'
 import { usePagination } from '../../hooks/usePagination'
@@ -49,8 +48,38 @@ const fieldLabel: React.CSSProperties = {
   color: 'var(--snowpeak-text)',
 }
 
-function toEmployeeInput(f: EmployeeFormState): EmployeeInput {
-  return { full_name: f.full_name, address: f.address, phone: f.phone, email: f.email, notes: f.notes }
+/** 列表行（含可空 address/phone/email/notes）→ 表单：null 回填为空白 */
+function toEmployeeForm(e: EmployeeView): EmployeeFormState {
+  return {
+    full_name: e.full_name,
+    address: e.address ?? '',
+    phone: e.phone ?? '',
+    email: e.email ?? '',
+    notes: e.notes ?? '',
+  }
+}
+
+/** 表单 → cloud 可空输入：address/phone/email/notes 空串归一化为 null（不写虚构文本） */
+function toEmployeeCloudInput(f: EmployeeFormState): EmployeeCloudInput {
+  const opt = (s: string): string | null => (s.trim() === '' ? null : s.trim())
+  return {
+    full_name: f.full_name,
+    address: opt(f.address),
+    phone: opt(f.phone),
+    email: opt(f.email),
+    notes: opt(f.notes),
+  }
+}
+
+/** 表单 → cloud 排班输入（employee_id/store_id 由 Select 保证非空，非法值由校验层 fail-closed） */
+function toShiftCloudInput(f: ShiftFormState): ShiftCloudInput {
+  return {
+    employee_id: f.employee_id as number,
+    store_id: f.store_id as number,
+    work_date: f.work_date,
+    start_time: f.start_time,
+    end_time: f.end_time,
+  }
 }
 
 /** Date → YYYY-MM-DD */
@@ -81,8 +110,25 @@ const WEEKDAY_LABELS = ['周一', '周二', '周三', '周四', '周五', '周�
 export function Employees() {
   const { role } = useAuth()
   const isCloud = isCloudMode()
-  const { employees, shifts, stores, loading, error, retry } = useWorkforce()
+  const {
+    employees,
+    shifts,
+    stores,
+    loading,
+    error,
+    retry,
+    createEmployee,
+    updateEmployee,
+    removeEmployee,
+    createShift,
+    updateShift,
+    removeShift,
+    mutating,
+  } = useWorkforce()
   const [tab, setTab] = useState('employees')
+
+  // 员工/排班写权限：仅 admin（cloud/local 统一；staff/contractor 由路由层 /employees 拦截 403）
+  const canWrite = role === 'admin'
 
   // 员工
   const [keyword, setKeyword] = useState('')
@@ -90,7 +136,6 @@ export function Employees() {
   const [editingEmployee, setEditingEmployee] = useState<EmployeeView | null>(null)
   const [empForm, setEmpForm] = useState<EmployeeFormState>(emptyEmployeeForm)
   const [empFieldError, setEmpFieldError] = useState<Record<string, string>>({})
-  const [submittingEmployee, setSubmittingEmployee] = useState(false)
 
   // 排班
   const [weekAnchor, setWeekAnchor] = useState(() => mondayOf(toDateStr(new Date())))
@@ -99,7 +144,15 @@ export function Employees() {
   const [editingShift, setEditingShift] = useState<ShiftView | null>(null)
   const [shiftForm, setShiftForm] = useState<ShiftFormState>(emptyShiftForm)
   const [shiftFieldError, setShiftFieldError] = useState<Record<string, string>>({})
-  const [submittingShift, setSubmittingShift] = useState(false)
+
+  // 卸载防护：异步保存/删除返回后，组件已卸载则不再写状态 / 触发全局消息
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
 
   const storeName = (id: number) => stores.find((s) => s.store_id === id)?.store_name ?? `#${id}`
 
@@ -113,7 +166,7 @@ export function Employees() {
   const { page, pageSize, setPage, setPageSize, paged, total } = usePagination(filteredEmployees, 10)
 
   const openCreateEmployee = () => {
-    if (isCloud) return
+    if (!canWrite) return
     setEditingEmployee(null)
     setEmpForm(emptyEmployeeForm)
     setEmpFieldError({})
@@ -121,33 +174,36 @@ export function Employees() {
   }
 
   const openEditEmployee = (e: EmployeeView) => {
-    if (isCloud) return
+    if (!canWrite) return
     setEditingEmployee(e)
-    setEmpForm({ full_name: e.full_name, address: e.address ?? '', phone: e.phone ?? '', email: e.email ?? '', notes: e.notes ?? '' })
+    setEmpForm(toEmployeeForm(e))
     setEmpFieldError({})
     setEmpFormVisible(true)
   }
 
-  const handleSaveEmployee = () => {
-    if (submittingEmployee || !role || isCloud) return
-    setSubmittingEmployee(true)
+  const handleSaveEmployee = async () => {
+    if (mutating || !canWrite) return
+    const input = toEmployeeCloudInput(empForm)
     const result = editingEmployee
-      ? dataService.updateEmployee(role, editingEmployee.employee_id, toEmployeeInput(empForm))
-      : dataService.createEmployee(role, toEmployeeInput(empForm))
-    setSubmittingEmployee(false)
+      ? await updateEmployee(editingEmployee.employee_id, input)
+      : await createEmployee(input)
+
+    if (!mountedRef.current) return
 
     if (result.ok) {
       MessagePlugin.success(editingEmployee ? '员工已更新' : '员工已新增')
       setEmpFormVisible(false)
+      setEmpForm(emptyEmployeeForm)
     } else {
       if (result.field) setEmpFieldError({ [result.field]: result.error })
       else MessagePlugin.error(result.error)
     }
   }
 
-  const handleDeleteEmployee = (e: EmployeeView) => {
-    if (!role || isCloud) return
-    const result = dataService.removeEmployee(role, e.employee_id)
+  const handleDeleteEmployee = async (e: EmployeeView) => {
+    if (!canWrite) return
+    const result = await removeEmployee(e.employee_id)
+    if (!mountedRef.current) return
     if (result.ok) MessagePlugin.success('员工已删除')
     else MessagePlugin.error(result.error)
   }
@@ -163,10 +219,10 @@ export function Employees() {
       width: 130,
       fixed: 'right',
       cell: ({ row }) => {
-        if (isCloud) {
+        if (!canWrite) {
           return (
             <span style={{ color: 'var(--snowpeak-text-placeholder)', fontSize: 12 }}>
-              云端写入待迁移
+              仅管理员可操作
             </span>
           )
         }
@@ -206,7 +262,7 @@ export function Employees() {
   const goThisWeek = () => setWeekAnchor(mondayOf(toDateStr(new Date())))
 
   const openCreateShift = (employeeId: number, date: string) => {
-    if (isCloud) return
+    if (!canWrite) return
     setEditingShift(null)
     setShiftForm({ employee_id: employeeId, store_id: undefined, work_date: date, start_time: '08:00', end_time: '16:00' })
     setShiftFieldError({})
@@ -214,27 +270,21 @@ export function Employees() {
   }
 
   const openEditShift = (s: ShiftView) => {
-    if (isCloud) return
+    if (!canWrite) return
     setEditingShift(s)
     setShiftForm({ employee_id: s.employee_id, store_id: s.store_id, work_date: s.work_date, start_time: s.start_time, end_time: s.end_time })
     setShiftFieldError({})
     setShiftFormVisible(true)
   }
 
-  const handleSaveShift = () => {
-    if (submittingShift || !role || isCloud) return
-    setSubmittingShift(true)
-    const input: ShiftInput = {
-      employee_id: shiftForm.employee_id as number,
-      store_id: shiftForm.store_id as number,
-      work_date: shiftForm.work_date,
-      start_time: shiftForm.start_time,
-      end_time: shiftForm.end_time,
-    }
+  const handleSaveShift = async () => {
+    if (mutating || !canWrite) return
+    const input = toShiftCloudInput(shiftForm)
     const result = editingShift
-      ? dataService.updateShift(role, editingShift.shift_id, input)
-      : dataService.createShift(role, input)
-    setSubmittingShift(false)
+      ? await updateShift(editingShift.shift_id, input)
+      : await createShift(input)
+
+    if (!mountedRef.current) return
 
     if (result.ok) {
       MessagePlugin.success(editingShift ? '排班已更新' : '排班已新增')
@@ -245,9 +295,10 @@ export function Employees() {
     }
   }
 
-  const handleDeleteShift = (s: ShiftView) => {
-    if (!role || isCloud) return
-    const result = dataService.removeShift(role, s.shift_id)
+  const handleDeleteShift = async (s: ShiftView) => {
+    if (!canWrite) return
+    const result = await removeShift(s.shift_id)
+    if (!mountedRef.current) return
     if (result.ok) MessagePlugin.success('排班已删除')
     else MessagePlugin.error(result.error)
   }
@@ -258,7 +309,7 @@ export function Employees() {
         title="员工与排班"
         subtitle={
           isCloud
-            ? 'CloudBase PostgreSQL · 只读阶段'
+            ? 'CloudBase PostgreSQL · 云端数据'
             : '维护员工信息与跨店排班（仅管理员可访问）'
         }
       />
@@ -297,7 +348,7 @@ export function Employees() {
                 prefixIcon={<SearchIcon />}
                 style={{ width: 280 }}
               />
-              {!isCloud && (
+              {canWrite && (
                 <Button theme="primary" icon={<AddIcon />} onClick={openCreateEmployee}>
                   新增员工
                 </Button>
@@ -396,7 +447,7 @@ export function Employees() {
                           overflow: 'hidden',
                           textOverflow: 'ellipsis',
                         }
-                        if (isCloud) {
+                        if (!canWrite) {
                           // 只读：不点击编辑、不提供删除
                           return (
                             <div style={cardStyle} title={`${storeName(shift.store_id)} ${shift.start_time}-${shift.end_time}`}>
@@ -429,7 +480,7 @@ export function Employees() {
                           </div>
                         )
                       }
-                      if (isCloud) {
+                      if (!canWrite) {
                         return (
                           <span style={{ fontSize: 12, color: 'var(--snowpeak-text-placeholder)' }}>
                             未排班
@@ -453,21 +504,21 @@ export function Employees() {
               />
             </div>
             <div style={{ marginTop: 8, fontSize: 12, color: 'var(--snowpeak-text-placeholder)' }}>
-              {isCloud
-                ? '当前为云端只读阶段，排班数据来自 CloudBase PostgreSQL，仅可查看，暂不支持编辑或新增班次。'
-                : '点击排班卡片可编辑；点击单元格「排班」可为该员工在当天新增班次（08:00–22:00，同员工同日仅一个班次）。'}
+              {canWrite
+                ? '点击排班卡片可编辑；点击单元格「排班」可为该员工在当天新增班次（08:00–22:00，同员工同日仅一个班次）。'
+                : '当前账号无排班管理权限，仅可查看排班数据。'}
             </div>
           </div>
         </Tabs.TabPanel>
       </Tabs>
 
-      {/* 员工表单 Dialog —— 仅 local */}
-      {!isCloud && (
+      {/* 员工表单 Dialog */}
+      {canWrite && (
         <Dialog
           visible={empFormVisible}
           header={editingEmployee ? '编辑员工' : '新增员工'}
           width={480}
-          confirmBtn={{ content: '保存', theme: 'primary', loading: submittingEmployee }}
+          confirmBtn={{ content: '保存', theme: 'primary', loading: mutating }}
           cancelBtn="取消"
           onConfirm={handleSaveEmployee}
           onClose={() => setEmpFormVisible(false)}
@@ -497,13 +548,13 @@ export function Employees() {
         </Dialog>
       )}
 
-      {/* 排班表单 Dialog —— 仅 local */}
-      {!isCloud && (
+      {/* 排班表单 Dialog */}
+      {canWrite && (
         <Dialog
           visible={shiftFormVisible}
           header={editingShift ? '编辑排班' : '新增排班'}
           width={480}
-          confirmBtn={{ content: '保存', theme: 'primary', loading: submittingShift }}
+          confirmBtn={{ content: '保存', theme: 'primary', loading: mutating }}
           cancelBtn="取消"
           onConfirm={handleSaveShift}
           onClose={() => setShiftFormVisible(false)}

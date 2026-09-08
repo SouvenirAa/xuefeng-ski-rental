@@ -108,10 +108,12 @@ function parseRequiredDate(v: string | null | undefined): string | Invalid {
 }
 
 const TIME_RE = /^(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,6}))?)?$/
-const SHIFT_START_MIN_MICROS = 8 * 3600 * 1_000_000 // 08:00:00.000000
-const SHIFT_END_MAX_MICROS = 22 * 3600 * 1_000_000 // 22:00:00.000000
+/** 营业时间下限 08:00:00.000000（整数微秒） */
+export const SHIFT_START_MIN_MICROS = 8 * 3600 * 1_000_000
+/** 营业时间上限 22:00:00.000000（整数微秒） */
+export const SHIFT_END_MAX_MICROS = 22 * 3600 * 1_000_000
 
-interface ParsedTime {
+export interface ParsedTime {
   /** 规范化展示串：无小数且秒为 0 → "HH:mm"；秒非 0 → "HH:mm:ss"；非零小数 → "HH:mm:ss.f" */
   canonical: string
   /** 总微秒数（含小数秒），用于范围 / 顺序比较，避免丢失小数秒精度 */
@@ -125,7 +127,7 @@ interface ParsedTime {
  * - 统一换算为整数微秒用于比较，不丢小数秒精度；
  * - 归一化展示串：无小数且秒为 0 → "HH:mm"；秒非 0 → "HH:mm:ss"；非零小数秒保留。
  */
-function parseTime(v: string | null | undefined): ParsedTime | Invalid {
+export function parseTime(v: string | null | undefined): ParsedTime | Invalid {
   if (typeof v !== 'string') return 'INVALID'
   const m = TIME_RE.exec(v.trim())
   if (!m) return 'INVALID'

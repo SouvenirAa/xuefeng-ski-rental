@@ -217,21 +217,6 @@ export function AppLayout() {
             background: 'var(--snowpeak-bg-page)',
           }}
         >
-          {isCloudMode() && (
-            <div
-              style={{
-                marginBottom: 12,
-                padding: '8px 12px',
-                fontSize: 13,
-                color: 'var(--snowpeak-accent)',
-                background: 'var(--snowpeak-accent-subtle)',
-                border: '1px solid var(--snowpeak-accent)',
-                borderRadius: 6,
-              }}
-            >
-              客户列表已接入 CloudBase PostgreSQL；客户写入及其他业务模块仍处于迁移阶段。
-            </div>
-          )}
           <Outlet />
         </Content>
       </Layout>

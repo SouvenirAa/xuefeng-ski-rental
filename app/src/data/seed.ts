@@ -71,9 +71,9 @@ export function createSeedDatabase(): Database {
   ]
 
   const accounts: Account[] = [
-    { account_id: 1, username: 'admin', password_placeholder: 'demo123', role: 'admin', employee_id: 1, contractor_id: null, enabled: true },
-    { account_id: 2, username: 'staff', password_placeholder: 'demo123', role: 'staff', employee_id: 2, contractor_id: null, enabled: true },
-    { account_id: 3, username: 'contractor', password_placeholder: 'demo123', role: 'contractor', employee_id: null, contractor_id: 1, enabled: true },
+    { account_id: 1, username: 'admin', password_placeholder: 'demo1234', role: 'admin', employee_id: 1, contractor_id: null, enabled: true },
+    { account_id: 2, username: 'staff', password_placeholder: 'demo1234', role: 'staff', employee_id: 2, contractor_id: null, enabled: true },
+    { account_id: 3, username: 'contractor', password_placeholder: 'demo1234', role: 'contractor', employee_id: null, contractor_id: 1, enabled: true },
   ]
 
   const customers: Customer[] = buildCustomers()
